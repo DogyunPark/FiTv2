@@ -24,6 +24,7 @@ from omegaconf import OmegaConf
 from tqdm import tqdm
 from PIL import Image
 from diffusers.models import AutoencoderKL
+from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from fit.scheduler.transport import create_transport, Sampler
 from fit.utils.eval_utils import create_npz_from_sample_folder, init_from_ckpt
 from fit.utils.utils import instantiate_from_config
@@ -108,6 +109,7 @@ def main(args):
     vae = AutoencoderKL.from_pretrained(vae_model, local_files_only=True).to(device, dtype=weight_dtype)
     vae.eval() # important
     
+    scheduler = FlowMatchEulerDiscreteScheduler()
     
     # prepare transport
     transport = create_transport(**OmegaConf.to_container(config_diffusion.transport))  # default: velocity; 
@@ -174,8 +176,13 @@ def main(args):
     total = 0
     index = 0
     all_images = []
+    times = 0
     while len(all_images) * n < int(args.num_fid_samples):
+        scheduler.set_timesteps(args.num_sampling_steps, device=device)
+        timesteps = scheduler.timesteps
+        print("timesteps: ", timesteps, flush=True)
         print(device, "device: ", index, flush=True)
+
         index+=1
         # Sample inputs:
         z = torch.randn(
@@ -195,7 +202,6 @@ def main(args):
         size = size[:, None, :]
         # Setup classifier-free guidance:
         if using_cfg:
-            z = torch.cat([z, z], 0)            # (B, N, patch_size**2 * C) -> (2B, N, patch_size**2 * C)
             y_null = torch.tensor([1000] * n, device=device)
             y = torch.cat([y, y_null], 0)       # (B,) -> (2B, )
             grid = torch.cat([grid, grid], 0)   # (B, 2, N) -> (2B, 2, N)
@@ -209,38 +215,58 @@ def main(args):
 
         
         # Sample images:
-        samples = sample_fn(z, model_fn, **model_kwargs)[-1]
-        if using_cfg:
-            samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
+        for idx, t in enumerate(timesteps):
+            if using_cfg:
+                z_input = torch.cat([z, z], 0)            # (B, N, patch_size**2 * C) -> (2B, N, patch_size**2 * C)
 
-        samples = samples[..., : n_patch_h*n_patch_w]
+            timestep = t.expand(z_input.shape[0]).to(z_input.device)
+            noise_pred = model(z_input, timestep, **model_kwargs)
+            if using_cfg:
+                noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2, dim=0)
+                noise_pred = noise_pred_uncond + args.cfg_scale * (noise_pred_cond - noise_pred_uncond)
+            
+            z = scheduler.step(
+                    model_output=noise_pred,
+                    timestep=timestep,
+                    sample=z,
+                ).prev_sample
+        # samples = sample_fn(z, model_fn, **model_kwargs)[-1]
+        # if using_cfg:
+        #     samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
+
+        samples = z[..., : n_patch_h*n_patch_w]
         samples = model.unpatchify(samples, (H, W))        
         samples = vae.decode(samples / vae.config.scaling_factor).sample
         samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
 
+        for i, img_tensor in enumerate(samples):
+            img = Image.fromarray(img_tensor.cpu().numpy())
+            img.save(os.path.join("/hub_data2/dogyun/samples_fit", f"mdt_sample_{times}_{i}.jpg"))
+        times += 1
+
         # gather samples
-        gathered_samples = [torch.zeros_like(samples) for _ in range(dist.get_world_size())]
-        dist.all_gather(gathered_samples, samples)  # gather not supported with NCCL
-        all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
-        # Save samples to disk as individual .png files
-        for i, sample in enumerate(samples.cpu().numpy()):
-            index = i * dist.get_world_size() + rank + total
-            Image.fromarray(sample).save(f"{sample_folder_dir}/{index:06d}.png")
-        total += global_batch_size
-        if rank == 0:
-            pbar.update()
+        # gathered_samples = [torch.zeros_like(samples) for _ in range(dist.get_world_size())]
+        # dist.all_gather(gathered_samples, samples)  # gather not supported with NCCL
+        all_images.extend([sample.cpu().numpy() for sample in [samples]])
+        # # Save samples to disk as individual .png files
+        # for i, sample in enumerate(samples.cpu().numpy()):
+        #     index = i * dist.get_world_size() + rank + total
+        #     Image.fromarray(sample).save(f"{sample_folder_dir}/{index:06d}.png")
+        # total += global_batch_size
+        # if rank == 0:
+        #     pbar.update()
 
     # Make sure all processes have finished saving their samples before attempting to convert to .npz
-    dist.barrier()
-    if rank == 0:
-        import time
-        time.sleep(20)
-        arr = np.concatenate(all_images, axis=0)
-        arr = arr[: int(args.num_fid_samples)]
-        npz_path = f"{sample_folder_dir}.npz"
-        np.savez(npz_path, arr_0=arr)
-        print(f"Saved .npz file to {npz_path} [shape={arr.shape}].")
-        print("Done.")
+    # dist.barrier()
+    # if rank == 0:
+    #     import time
+    #     time.sleep(20)
+    #     arr = np.concatenate(all_images, axis=0)
+    #     arr = arr[: int(args.num_fid_samples)]
+    #     npz_path = f"{sample_folder_dir}.npz"
+    #     np.savez(npz_path, arr_0=arr)
+    #     print(f"Saved .npz file to {npz_path} [shape={arr.shape}].")
+    #     print("Done.")
     dist.barrier()
     dist.destroy_process_group()
 
