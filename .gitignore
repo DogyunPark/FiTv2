@@ -21,3 +21,8 @@ batch*
 /.ipynb_checkpoints
 *.ipynb_checkpoints
 /test
+
+/ckpt
+/datasets
+/LWD
+/samples_fit

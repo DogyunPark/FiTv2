@@ -73,7 +73,7 @@ class IN1kLatentDataset(Dataset):
 # from https://github.com/Alpha-VLLM/LLaMA2-Accessory/blob/main/Large-DiT-ImageNet/train.py#L60
 
 # from https://github.com/Alpha-VLLM/LLaMA2-Accessory/blob/main/Large-DiT-ImageNet/train.py#L60
-def get_train_sampler(dataset, global_batch_size, max_steps, resume_steps, seed):
+def get_train_sampler(dataset, global_batch_size, max_steps, resume_step, seed):
     sample_indices = torch.empty([max_steps * global_batch_size], dtype=torch.long)
     epoch_id, fill_ptr, offs = 0, 0, 0
     while fill_ptr < sample_indices.size(0):
@@ -87,7 +87,7 @@ def get_train_sampler(dataset, global_batch_size, max_steps, resume_steps, seed)
         sample_indices[fill_ptr: fill_ptr + epoch_sample_indices.size(0)] = \
             epoch_sample_indices
         fill_ptr += epoch_sample_indices.size(0)
-    return sample_indices[resume_steps * global_batch_size : ].tolist()
+    return sample_indices[resume_step * global_batch_size : ].tolist()
 
 
    
@@ -114,7 +114,7 @@ class INLatentLoader():
 
     def train_dataloader(self, global_batch_size, max_steps, resume_step, seed=42):
         sampler = get_train_sampler(
-            self.train_dataset, global_batch_size, max_steps, resume_steps, seed
+            self.train_dataset, global_batch_size, max_steps, resume_step, seed
         )
         return DataLoader(
             self.train_dataset,

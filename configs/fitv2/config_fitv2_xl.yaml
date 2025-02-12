@@ -37,6 +37,7 @@ diffusion:
       use_sit: true
       use_swiglu: true
       use_swiglu_large: false
+      use_checkpoint: True
       q_norm: layernorm
       k_norm: layernorm
       qk_norm_weight: false
@@ -71,17 +72,32 @@ accelerate:
   max_grad_norm: 1.0
   optimizer:
     target: torch.optim.AdamW
+    #target: CAME
     params:
       betas: ${tuple:0.9, 0.999}
       weight_decay: 0 #1.0e-2
       eps: 1.0e-8
+      # betas: ${tuple:0.9, 0.999, 0.9999}
+      # weight_decay: 1.0e-2
+      # eps: ${tuple:1e-30, 1e-16}
   lr_scheduler: constant_with_warmup
   lr_warmup_steps: 50000
   # checkpoint config
   logger: wandb
   checkpointing_epochs: False
   checkpointing_steps: 4000
-  checkpointing_steps_list: [200000, 400000, 1000000, 1400000, 1500000, 1800000]
+  checkpointing_steps_list: [500, 200000, 400000, 1000000, 1400000, 1500000, 1800000]
   checkpoints_total_limit: 2
   logging_steps: 1000
-  
+
+  fsdp_config:
+    sharding_strategy: FULL_SHARD
+    backward_prefetch: BACKWARD_PRE
+    min_num_params: 10000000
+    cpu_offload: False
+    state_dict_type: FULL_STATE_DICT
+    limit_all_gathers: false
+    use_orig_params: true
+    sync_module_states: true
+    forward_prefetch: false
+    activation_checkpointing: false

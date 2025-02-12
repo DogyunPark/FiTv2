@@ -1,6 +1,7 @@
 import importlib
-
 import torch
+from came_pytorch import CAME
+from collections import OrderedDict
 
 def get_obj_from_str(string, reload=False, invalidate_cache=True):
     module, cls = string.rsplit(".", 1)
@@ -39,6 +40,10 @@ def update_ema(ema_model, model, decay=0.9999):
         ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
 
 
+def exists(x):
+    if x is None:
+        return False
+    return True
 
 def default(val, d):
     if exists(val):

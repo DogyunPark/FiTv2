@@ -9,7 +9,7 @@ from fit.model.modules import (
 )
 from fit.model.utils import get_parameter_dtype
 from fit.utils.eval_utils import init_from_ckpt
-from fit.model.sincos import get_2d_sincos_pos_embed_from_grid
+#from fit.model.sincos import get_2d_sincos_pos_embed_from_grid
 from fit.model.rope import VisionRotaryEmbedding
 
 #################################################################################
@@ -229,8 +229,6 @@ class FiT(nn.Module):
         if not self.use_sit:
             x = rearrange(x, 'B N C -> B C N')          # (B, N, C) -> (B, C, N), where C = p**2 * C_out
         return x
-    
-    
     
     def forward_with_cfg(self, x, t, y, grid, mask, size, cfg_scale, scale_pow=0.0):
         """

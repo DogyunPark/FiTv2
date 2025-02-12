@@ -29,8 +29,13 @@ def log_state(state):
     return '\n'.join(result)
 
 
-
-
+# Loss functions
+def loss_func_huber(x, y):
+    data_dim = x.shape[1] * x.shape[2]
+    huber_c = 0.00054 * data_dim
+    loss = th.sum((x - y)**2, dim = (1, 2))
+    loss = th.sqrt(loss + huber_c**2) - huber_c
+    return loss / data_dim
 
 
 def get_flexible_mask_and_ratio(model_kwargs: dict, x: th.Tensor):

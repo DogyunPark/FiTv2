@@ -24,7 +24,8 @@ from omegaconf import OmegaConf
 from tqdm import tqdm
 from PIL import Image
 from diffusers.models import AutoencoderKL
-from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
+#from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
+from flow_match_scheduler import FlowMatchEulerDiscreteScheduler
 from fit.scheduler.transport import create_transport, Sampler
 from fit.utils.eval_utils import create_npz_from_sample_folder, init_from_ckpt
 from fit.utils.utils import instantiate_from_config
@@ -106,10 +107,10 @@ def main(args):
         vae_model = 'stabilityai/sd-vae-ft-mse'
     elif args.vae_decoder == 'sd-ft-ema':
         vae_model = 'stabilityai/sd-vae-ft-ema'
-    vae = AutoencoderKL.from_pretrained(vae_model, local_files_only=True).to(device, dtype=weight_dtype)
+    vae = AutoencoderKL.from_pretrained(vae_model, local_files_only=False).to(device, dtype=weight_dtype)
     vae.eval() # important
     
-    scheduler = FlowMatchEulerDiscreteScheduler()
+    scheduler = FlowMatchEulerDiscreteScheduler(invert_sigmas=True)
     
     # prepare transport
     transport = create_transport(**OmegaConf.to_container(config_diffusion.transport))  # default: velocity; 
@@ -150,11 +151,11 @@ def main(args):
     folder_name = f'{args.ckpt.split("/")[-1].split(".")[0]}'
 
     
-    sample_folder_dir = f"{args.sample_dir}/{workdir_name}/{folder_name}"
-    if rank == 0:
-        os.makedirs(os.path.join(args.sample_dir, workdir_name), exist_ok=True)
-        os.makedirs(sample_folder_dir, exist_ok=True)
-        print(f"Saving .png samples at {sample_folder_dir}")
+    # sample_folder_dir = f"{args.sample_dir}/{workdir_name}/{folder_name}"
+    # if rank == 0:
+    #     os.makedirs(os.path.join(args.sample_dir, workdir_name), exist_ok=True)
+    #     os.makedirs(sample_folder_dir, exist_ok=True)
+    #     print(f"Saving .png samples at {sample_folder_dir}")
     dist.barrier()
     args.cfg_scale = float(args.cfg_scale)
     assert args.cfg_scale >= 1.0, "In almost all cases, cfg_scale be >= 1.0"
@@ -185,6 +186,7 @@ def main(args):
 
         index+=1
         # Sample inputs:
+        #import pdb; pdb.set_trace()
         z = torch.randn(
             (n, n_patch_h*n_patch_w, (patch_size**2)*model.in_channels)
         ).to(device=device, dtype=weight_dtype)
@@ -207,29 +209,42 @@ def main(args):
             grid = torch.cat([grid, grid], 0)   # (B, 2, N) -> (2B, 2, N)
             mask = torch.cat([mask, mask], 0)   # (B, N) -> (2B, N)
             size = torch.cat([size, size], 0)
-            model_kwargs = dict(y=y, grid=grid, mask=mask, size=size, cfg_scale=args.cfg_scale, scale_pow=args.scale_pow)
+            #model_kwargs = dict(y=y, grid=grid, mask=mask, size=size, cfg_scale=args.cfg_scale, scale_pow=args.scale_pow)
+            model_kwargs = dict(y=y, grid=grid, mask=mask, size=size)
             model_fn = model.forward_with_cfg
         else:
             model_kwargs = dict(y=y, grid=grid, mask=mask, size=size)
             model_fn = model.forward
 
-        
+        sigmas = torch.linspace(0, 1, args.num_sampling_steps+1).to(device)
+
         # Sample images:
-        for idx, t in enumerate(timesteps):
+        # timesteps = reversed(timesteps)
+        #for idx, t in enumerate(sigmas):
+        for idx in range(len(sigmas)-1):
             if using_cfg:
                 z_input = torch.cat([z, z], 0)            # (B, N, patch_size**2 * C) -> (2B, N, patch_size**2 * C)
+            else:
+                z_input = z
 
-            timestep = t.expand(z_input.shape[0]).to(z_input.device)
+
+            sigma_current = sigmas[idx]
+            sigma_next = sigmas[idx+1]
+            timestep = sigma_current.expand(z_input.shape[0]).to(z_input.device)
+            #print("timestep: ", timestep, flush=True)
             noise_pred = model(z_input, timestep, **model_kwargs)
+            #noise_pred, rest = noise_pred[:, :, :3*patch_size*patch_size:], noise_pred[:, :, 3*patch_size*patch_size:]
             if using_cfg:
-                noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2, dim=0)
+                noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2, dim=0)
                 noise_pred = noise_pred_uncond + args.cfg_scale * (noise_pred_cond - noise_pred_uncond)
-            
-            z = scheduler.step(
-                    model_output=noise_pred,
-                    timestep=timestep,
-                    sample=z,
-                ).prev_sample
+            #noise_pred = torch.cat([noise_pred, rest], dim=2)
+            z = z + (sigma_next - sigma_current) * noise_pred
+
+            # z = scheduler.step(
+            #         model_output=noise_pred,
+            #         timestep=timestep,
+            #         sample=z,
+            #     ).prev_sample
         # samples = sample_fn(z, model_fn, **model_kwargs)[-1]
         # if using_cfg:
         #     samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
@@ -241,7 +256,7 @@ def main(args):
 
         for i, img_tensor in enumerate(samples):
             img = Image.fromarray(img_tensor.cpu().numpy())
-            img.save(os.path.join("/hub_data2/dogyun/samples_fit", f"mdt_sample_{times}_{i}.jpg"))
+            img.save(os.path.join("./samples_fit", f"fitv2_sample_{times}_{i}.jpg"))
         times += 1
 
         # gather samples
