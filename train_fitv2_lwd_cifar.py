@@ -200,6 +200,12 @@ def parse_args():
         default=False,
         help="Whether to use consistency loss."
     )
+    parser.add_argument(
+        "--distillation",
+        action="store_true",
+        default=False,
+        help="Whether to use distillation."
+    )
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -355,10 +361,10 @@ def main():
     else:
         learning_rate = accelerate_cfg.learning_rate
 
-    
-    pretrained_model = instantiate_from_config(diffusion_cfg.network_config).to(device=device)
-    init_from_ckpt(pretrained_model, checkpoint_dir=args.pretrain_ckpt, ignore_keys=None, verbose=True)
-    pretrained_model.eval()
+    if args.distillation:
+        pretrained_model = instantiate_from_config(diffusion_cfg.network_config).to(device=device)
+        init_from_ckpt(pretrained_model, checkpoint_dir=args.pretrain_ckpt, ignore_keys=None, verbose=True)
+        pretrained_model.eval()
 
     model = instantiate_from_config(diffusion_cfg.distillation_network_config).to(device=device)
     #init_from_ckpt(model, checkpoint_dir=args.pretrain_ckpt2, ignore_keys=None, verbose=True)
@@ -534,6 +540,8 @@ def main():
 
     for step, batch in enumerate(train_dataloader, start=global_steps):
         x, y = batch
+
+        
 
         N_batch = int(torch.max(torch.sum(size[..., 0] * size[..., 1], dim=-1)))
         x, grid, mask = x[:, : N_batch], grid[..., : N_batch], mask[:, : N_batch]
