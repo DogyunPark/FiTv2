@@ -1,6 +1,6 @@
 import importlib
 import torch
-from came_pytorch import CAME
+#from came_pytorch import CAME
 from collections import OrderedDict
 
 def get_obj_from_str(string, reload=False, invalidate_cache=True):

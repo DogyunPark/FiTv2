@@ -48,11 +48,15 @@ from fit.model.fit_model import FiTBlock
 from fit.model.modules import FinalLayer, PatchEmbedder, TimestepEmbedder, LabelEmbedder
 from fit.scheduler.transport.utils import get_flexible_mask_and_ratio, mean_flat
 
-from came_pytorch import CAME
 from PIL import Image
-from elatentlpips import ELatentLPIPS
 from fit.scheduler.transport.utils import loss_func_huber
 from fit.data.cifar_dataset import create_cifar10_dataloader
+
+
+def cycle(dl):
+    while True:
+        for data in dl:
+            yield data
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -440,7 +444,7 @@ def main():
             logger.info(f"Resuming from steps: {global_steps}")
 
     train_dataloader = create_cifar10_dataloader(
-        batch_size=total_batch_size, num_workers=data_cfg.params.train.loader.num_workers, train=True
+        batch_size=data_cfg.params.train.loader.batch_size, num_workers=data_cfg.params.train.loader.num_workers, train=True
     )
 
     # Setup optimizer and lr_scheduler
@@ -469,7 +473,8 @@ def main():
     optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         optimizer, train_dataloader, lr_scheduler
     )
-    
+    train_dataloader = cycle(train_dataloader)
+
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process and getattr(accelerate_cfg, 'logger', 'wandb') != None:
@@ -483,14 +488,14 @@ def main():
     
     # Train!
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {train_len}")
+    #logger.info(f"  Num examples = {len(train_dataloader)}")
     logger.info(f"  Instantaneous batch size per device = {data_cfg.params.train.loader.batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Learning rate = {learning_rate}")
     logger.info(f"  Gradient Accumulation steps = {grad_accu_steps}")
     logger.info(f"  Total optimization steps = {accelerate_cfg.max_train_steps}")
     logger.info(f"  Current optimization steps = {global_steps}")
-    logger.info(f"  Train dataloader length = {len(train_dataloader)} ")
+    #logger.info(f"  Train dataloader length = {len(train_dataloader)} ")
     logger.info(f"  Training Mixed-Precision = {accelerate_cfg.mixed_precision}")
 
     # Potentially load in the weights and states from a previous save
@@ -531,25 +536,35 @@ def main():
     model.train()
     train_loss = 0.0
 
-    test_batch_size = 2
+    test_batch_size = 4
     n_patch_h, n_patch_w = 16, 16
     H, W = n_patch_h * 2, n_patch_w * 2
     print('Generating images with resolution: ', H*8, 'x', W*8)
-    y_test = torch.randint(0, 1000, (test_batch_size,), device=device)
+    y_test = torch.randint(0, 10, (test_batch_size,), device=device)
     noise_test = torch.randn((test_batch_size, n_patch_h*n_patch_w, (2**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
+    
+    grid_h = torch.arange(n_patch_h, dtype=torch.long)
+    grid_w = torch.arange(n_patch_w, dtype=torch.long)
+    grid = torch.meshgrid(grid_w, grid_h, indexing='xy')
+    grid = torch.cat(
+        [grid[0].reshape(1,-1), grid[1].reshape(1,-1)], dim=0
+    ).repeat(data_cfg.params.train.loader.batch_size,1,1).to(device=device, dtype=torch.long)
+    size = torch.tensor((n_patch_h, n_patch_w)).repeat(data_cfg.params.train.loader.batch_size,1).to(device=device, dtype=torch.long)
+    size = size[:, None, :]
 
-    for step, batch in enumerate(train_dataloader, start=global_steps):
-        x, y = batch
-
-        
-
-        N_batch = int(torch.max(torch.sum(size[..., 0] * size[..., 1], dim=-1)))
-        x, grid, mask = x[:, : N_batch], grid[..., : N_batch], mask[:, : N_batch]
-        
+    #for step, batch in enumerate(train_dataloader, start=global_steps):
+    for step in range(global_steps, accelerate_cfg.max_train_steps):
+        batch = next(train_dataloader)
+        x, y = batch[0], batch[1]
+        x = x * 2 - 1
+        x = x.reshape(x.shape[0], -1, n_patch_h, 2, n_patch_w, 2)
+        x = rearrange(x, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+        x = x.permute(0, 2, 1)
         # prepare other parameters
-        y = y.squeeze(dim=-1).to(torch.int)
+        y = y.to(torch.int)
+        mask = torch.ones(data_cfg.params.train.loader.batch_size, n_patch_h*n_patch_w).to(device=device, dtype=torch.bfloat16)
 
-        cfg_scale = torch.randint(1, 5, (1,))
+        cfg_scale = torch.randint(1, 2, (1,))
         cfg_scale_cond = cfg_scale.expand(x.shape[0]).to(device=device)
 
         layer_idx = torch.randint(0, number_of_perflow, (1,)).item()
@@ -580,43 +595,35 @@ def main():
             ratio = ratio.unsqueeze(-1)
         xt = x0 * (1-ratio) + x * ratio
 
-        with torch.no_grad():
-            y_null = torch.tensor([1000] * x.shape[0], device=device)
-            y_cfg = torch.cat([y, y_null], dim=0)
-            grid_cfg = torch.cat([grid, grid], dim=0)
-            mask_cfg = torch.cat([mask, mask], dim=0)
-            size_cfg = torch.cat([size, size], dim=0)
-            model_kwargs_cfg = dict(y=y_cfg, grid=grid_cfg.long(), mask=mask_cfg, size=size_cfg)
+        if args.distillation:
+            with torch.no_grad():
+                y_null = torch.tensor([1000] * x.shape[0], device=device)
+                y_cfg = torch.cat([y, y_null], dim=0)
+                grid_cfg = torch.cat([grid, grid], dim=0)
+                mask_cfg = torch.cat([mask, mask], dim=0)
+                size_cfg = torch.cat([size, size], dim=0)
+                model_kwargs_cfg = dict(y=y_cfg, grid=grid_cfg.long(), mask=mask_cfg, size=size_cfg)
 
-            for i in range(perflow_solver_step):
-                sigma_next_i = sigma_list[i+1]
-                sigma_current_i = sigma_list[i]
-                t_cfg = sigma_current_i.repeat(x.shape[0]*2).to(device=device)
-                x_input = torch.cat([xt, xt], dim=0)
-                model_output = pretrained_model(x_input, t_cfg, **model_kwargs_cfg)
+                for i in range(perflow_solver_step):
+                    sigma_next_i = sigma_list[i+1]
+                    sigma_current_i = sigma_list[i]
+                    t_cfg = sigma_current_i.repeat(x.shape[0]*2).to(device=device)
+                    x_input = torch.cat([xt, xt], dim=0)
+                    model_output = pretrained_model(x_input, t_cfg, **model_kwargs_cfg)
 
-                C_cfg = 3 * 2 * 2
-                #eps, rest = model_output[:, :, :C_cfg], model_output[:, :, C_cfg:]
-                noise_pred_cond, noise_pred_uncond = model_output.chunk(2, dim=0)
-                noise_pred = noise_pred_uncond + cfg_scale.to(device=device) * (noise_pred_cond - noise_pred_uncond)
-                #eps = torch.cat([half_eps, half_eps], dim=0)
-                #noise_pred = torch.cat([eps, rest], dim=2)
-                #noise_pred, _ = noise_pred.chunk(2, dim=0)
-                xt = xt + (sigma_next_i - sigma_current_i) * noise_pred
-            
-            # for idx, sample in enumerate(xt):
-            #     sample = sample.unsqueeze(0)
-            #     samples = sample[:, : size[idx, :, 0].item() * size[idx, :, 1].item()]
-            #     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-            #         samples = model.module.unpatchify(samples, (size[idx, :, 0].item()*2, size[idx, :, 1].item()*2))
-            #     else:
-            #         samples = model.unpatchify(samples, (size[idx, :, 0].item()*2, size[idx, :, 1].item()*2))
-            #     samples = samples.to(torch.bfloat16)     
-            #     samples = vae.decode(samples / vae.config.scaling_factor).sample
-            #     samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
-            #     for i, img_tensor in enumerate(samples):
-            #         img = Image.fromarray(img_tensor.cpu().numpy())
-            #         img.save(os.path.join("./samples_fit", f"fitv2_sample_{i}.jpg"))
+                    C_cfg = 3 * 2 * 2
+                    #eps, rest = model_output[:, :, :C_cfg], model_output[:, :, C_cfg:]
+                    noise_pred_cond, noise_pred_uncond = model_output.chunk(2, dim=0)
+                    noise_pred = noise_pred_uncond + cfg_scale.to(device=device) * (noise_pred_cond - noise_pred_uncond)
+                    #eps = torch.cat([half_eps, half_eps], dim=0)
+                    #noise_pred = torch.cat([eps, rest], dim=2)
+                    #noise_pred, _ = noise_pred.chunk(2, dim=0)
+                    xt = xt + (sigma_next_i - sigma_current_i) * noise_pred
+        else:
+            ratio_next = sigma_next.clone()
+            while len(ratio_next.shape) < x0.ndim:
+                ratio_next = ratio_next.unsqueeze(-1)
+            xt = x0 * (1-ratio_next) + x * ratio_next
 
         if args.reflow:
             xt_input = x0 * (1-ratio) + x * ratio
@@ -630,7 +637,7 @@ def main():
             weight = 1.
         else:
             x_input = x0 * (1-ratio) + x * ratio
-            target = (xt - x_input) / (sigma_next_i - sigma_current)
+            target = (xt - x_input) / (sigma_next - sigma_current)
             t_input = sigma_current.repeat(x.shape[0]).to(device=device)
             weight = 1.
 
@@ -661,7 +668,7 @@ def main():
             loss = losses.mean()
 
             if args.consistency_loss:
-                t_plus_input = sigma_next_i.repeat(x.shape[0]).to(device=device)
+                t_plus_input = sigma_next.repeat(x.shape[0]).to(device=device)
                 if isinstance(model, torch.nn.parallel.DistributedDataParallel):
                     pred_model_xt = model.module.forward_run_layer_from_target_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, number_of_layers_for_perflow=number_of_layers_for_perflow)
 
@@ -758,7 +765,7 @@ def main():
 
                     model_kwargs_test = dict(y=y_test, grid=grid_test.long(), mask=mask_test, size=size_test)
 
-                    cfg_scale_test = 4 * torch.ones(1)
+                    cfg_scale_test = torch.ones(1)
                     cfg_scale_cond_test = cfg_scale_test.expand(noise_test.shape[0]).to(device=device)
                     t_test = torch.zeros_like(cfg_scale_cond_test)
                     output_test = model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, number_of_layers_for_perflow=number_of_layers_for_perflow)
@@ -768,8 +775,7 @@ def main():
                         samples = model.module.unpatchify(samples, (H, W))
                     else:
                         samples = model.unpatchify(samples, (H, W))
-                    samples = samples.to(torch.bfloat16)     
-                    samples = vae.decode(samples / vae.config.scaling_factor).sample
+                    samples = samples.clamp(-1, 1)     
                     samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
                     
                     if accelerator.is_main_process:
