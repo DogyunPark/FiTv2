@@ -124,6 +124,7 @@ accelerate:
   checkpoints_total_limit: 4
   logging_steps: 1000
   evaluation_steps: 200
+  eval_fid_steps: 10000
 
   # fsdp_config:
   #   sharding_strategy: FULL_SHARD

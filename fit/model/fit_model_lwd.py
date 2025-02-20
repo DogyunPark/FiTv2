@@ -225,7 +225,7 @@ class FiTLwD(nn.Module):
             x = rearrange(x, "b (c p1 p2) h w -> b c (h p1) (w p2)", p1=p, p2=p) # (B, 16, h//2, w//2) -> (B, h, w, 4)
         return x
 
-    def forward(self, x, t, cfg, y, grid, mask, size=None, number_of_layers_for_perflow=None, number_of_step_perflow=1):
+    def forward(self, x, t, cfg, y, grid, mask, size=None, number_of_step_perflow=1):
         """
         Forward pass of FiT.
         x: (B, p**2 * C_in, N), tensor of sequential inputs (flattened latent features of images, N=H*W/(p**2))
@@ -250,7 +250,7 @@ class FiTLwD(nn.Module):
         
         if not self.use_checkpoint:
             #for i, block in enumerate(self.blocks):
-            for i in range(len(self.blocks) // number_of_layers_for_perflow):
+            for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
                 # i_mod = i // number_of_layers_for_perflow
                 # i_drop = i % number_of_layers_for_perflow
                 # i_finish = (i+1) % number_of_layers_for_perflow
@@ -289,7 +289,7 @@ class FiTLwD(nn.Module):
                     else:
                         x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
                     
-                    for block in self.blocks[i*number_of_layers_for_perflow: (i+1)*number_of_layers_for_perflow]:
+                    for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
                         x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
                     
                     #if i_finish == 0:
@@ -309,7 +309,7 @@ class FiTLwD(nn.Module):
                     #x = x + residual
         else:
             #for i, block in enumerate(self.blocks):
-            for i in range(len(self.blocks) // number_of_layers_for_perflow):
+            for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
                 # i_mod = i // number_of_layers_for_perflow
                 # i_drop = i % number_of_layers_for_perflow
                 # i_finish = (i+1) % number_of_layers_for_perflow
@@ -348,7 +348,7 @@ class FiTLwD(nn.Module):
                     else:
                         x = self.x_embedder(x)   
 
-                    for block in self.blocks[i*number_of_layers_for_perflow: (i+1)*number_of_layers_for_perflow]:
+                    for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
                         x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c, mask, freqs_cos, freqs_sin, global_adaln)  
                     
                     if self.perlayer_embedder:
@@ -515,47 +515,142 @@ class FiTLwD(nn.Module):
                         break
         return x
     
-    def forward_with_cfg(self, x, t, y, grid, mask, size, cfg_scale, scale_pow=0.0):
+    def forward_cfg(self, x, t, cfg, y, grid, mask, size=None, number_of_step_perflow=1):
         """
-        Forward pass with classifier free guidance of FiT.
-        x: (2B, N, p**2 * C_in) if use_sit else (2B, p**2 * C_in, N) tensor of sequential inputs (flattened latent features of images, N=H*W/(p**2))
-        t: (2B,) tensor of diffusion timesteps
-        y: (2B,) tensor of class labels
-        grid: (2B, 2, N): tensor of height and weight indices that spans a grid
-        mask: (2B, N): tensor of the mask for the sequence
-        cfg_scale: float > 1.0
+        Forward pass of FiT.
+        x: (B, p**2 * C_in, N), tensor of sequential inputs (flattened latent features of images, N=H*W/(p**2))
+        t: (B,), tensor of diffusion timesteps
+        y: (B,), tensor of class labels
+        grid: (B, 2, N), tensor of height and weight indices that spans a grid
+        mask: (B, N), tensor of the mask for the sequence
+        size: (B, n, 2), tensor of the height and width, n is the number of the packed iamges
+        --------------------------------------------------------------------------------------------
         return: (B, p**2 * C_out, N), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
         """
-        half = x[: len(x) // 2]                     # (2B, ...) -> (B, ...)
-        combined = torch.cat([half, half], dim=0)   # (2B, ...)
-        model_out = self.forward(combined, t, y, grid, mask, size)  # (2B, N, C) is use_sit else (2B, C, N) , where C = p**2 * C_out
-        # For exact reproducibility reasons, we apply classifier-free guidance on only
-        # three channels by default. The standard approach to cfg applies it to all channels.
-        # This can be done by uncommenting the following line and commenting-out the line following that.
-        # C_cfg = self.in_channels * self.patch_size * self.patch_size
-        C_cfg = 3 * self.patch_size * self.patch_size
-        if self.use_sit:
-            eps, rest = model_out[:, :, :C_cfg], model_out[:, :, C_cfg:]  # eps: (2B, N, C_cfg), where C_cfg = p**2 * 3
+
+        assert cfg > 1, "cfg must be greater than 1"
+        y_null = torch.tensor([self.num_classes] * x.shape[0], device=x.device)
+        y = torch.cat([y, y_null], dim=0)
+        y = self.y_embedder(y, self.training)           # (B, D)
+        size = torch.cat([size, size], dim=0)
+        grid = torch.cat([grid, grid], dim=0)
+        mask = torch.cat([mask, mask], dim=0)
+        
+        # get RoPE frequences in advance, then calculate attention.
+        if self.online_rope:    
+            freqs_cos, freqs_sin = self.rel_pos_embed.online_get_2d_rope_from_grid(grid, size)
+            freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
         else:
-            eps, rest = model_out[:, :C_cfg], model_out[:, C_cfg:]  # eps: (2B, C_cfg, N), where C_cfg = p**2 * 3
-        cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)   # (2B, C_cfg, H, W) -> (B, C_cfg, H, W)        
-        # from https://github.com/sail-sg/MDT/blob/main/masked_diffusion/models.py#L506
-        # improved classifier-free guidance
-        if scale_pow == 0.0:
-            real_cfg_scale = cfg_scale
+            freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
+            freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
+        
+        if not self.use_checkpoint:
+            for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
+                sigma_next = self.sigmas[i+1] 
+                sigma_current = self.sigmas[i]
+                sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
+
+                for step in range(number_of_step_perflow):
+                    t = sigma_list[step].expand(x.shape[0]*2).to(x.device)
+                    t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
+                    t = t.float().to(x.dtype)
+                    t = self.t_embedder(t)
+                    c = t + y
+
+                    if self.fourier_basis is not None:
+                        t_next = self.sigmas[i+1].expand(x.shape[0]).to(x.device)
+                        t_next = torch.clamp(self.time_shifting * t_next / (1  + (self.time_shifting - 1) * t_next), max=1.0)        
+                        t_next = t_next.float().to(x.dtype)
+                        basis = self.fourier_basis(t_next)
+                        cos_basis, sin_basis = basis.chunk(2, dim=-1)
+                        cos_basis = cos_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
+                        sin_basis = sin_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
+                    
+                    if self.global_adaLN_modulation != None:
+                        global_adaln = self.global_adaLN_modulation(c)
+                    else: 
+                        global_adaln = 0.0
+
+                    residual = x.clone()
+                    x = torch.cat([x, x], dim=0)
+
+                    if not self.use_sit:
+                        x = rearrange(x, 'B C N -> B N C')          # (B, C, N) -> (B, N, C), where C = p**2 * C_in
+                    x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
+
+                    for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
+                        x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
+
+                    x = self.final_layer(x, c)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
+
+                    if self.fourier_basis is not None:
+                        coeff_cos, coeff_sin = x.chunk(2, dim=-1)
+                        x = coeff_cos * cos_basis + coeff_sin * sin_basis
+
+                    x = x * mask[..., None]                         # mask the padding tokens
+                    if not self.use_sit:
+                        x = rearrange(x, 'B N C -> B C N')          # (B, N, C) -> (B, C, N), where C = p**2 * C_out
+                    
+                    x_cond, x_uncond = x.chunk(2, dim=0)
+                    x = x_uncond + cfg * (x_cond - x_uncond)
+                    x = (sigma_list[step+1] - sigma_list[step]) * x + residual
         else:
-            scale_step = (
-                1-torch.cos(((1-torch.clamp_max(t, 1.0))**scale_pow)*torch.pi)
-            )*1/2 # power-cos scaling 
-            real_cfg_scale = (cfg_scale-1)*scale_step + 1
-            real_cfg_scale = real_cfg_scale[: len(x) // 2].view(-1, 1, 1)
-        t = t / (self.time_shifting + (1 - self.time_shifting) * t)
-        half_eps = uncond_eps + real_cfg_scale * (cond_eps - uncond_eps)    # (B, ...)
-        eps = torch.cat([half_eps, half_eps], dim=0)    # (B, ...) -> (2B, ...)
-        if self.use_sit:
-            return torch.cat([eps, rest], dim=2)          # (2B, N, C), where C = p**2 * C_out
-        else:
-            return torch.cat([eps, rest], dim=1)          # (2B, C, N), where C = p**2 * C_out
+            for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
+                sigma_next = self.sigmas[i+1] 
+                sigma_current = self.sigmas[i]
+                sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
+
+                for step in range(number_of_step_perflow):
+                    #if i_drop == 0:
+                    t = sigma_list[step].expand(x.shape[0]*2).to(x.device)
+                    t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
+                    t = t.float().to(x.dtype)
+                    t = self.t_embedder(t)
+                    c = t + y
+
+                    if self.fourier_basis is not None:
+                        t_next = self.sigmas[i+1].expand(x.shape[0]).to(x.device)
+                        t_next = torch.clamp(self.time_shifting * t_next / (1  + (self.time_shifting - 1) * t_next), max=1.0)        
+                        t_next = t_next.float().to(x.dtype)
+                        basis = self.fourier_basis(t_next)
+                        cos_basis, sin_basis = basis.chunk(2, dim=-1)
+                        cos_basis = cos_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
+                        sin_basis = sin_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
+                    
+                    if self.global_adaLN_modulation != None:
+                        global_adaln = self.global_adaLN_modulation(c)
+                    else: 
+                        global_adaln = 0.0
+
+                    residual = x.clone()
+                    x = torch.cat([x, x], dim=0)
+                    mask = torch.cat([mask, mask], dim=0)
+                    size = torch.cat([size, size], dim=0)
+                    grid = torch.cat([grid, grid], dim=0)
+                    y_null = torch.tensor([self.num_classes] * x.shape[0], device=x.device)
+                    y = torch.cat([y, y_null], dim=0)
+
+                    if not self.use_sit:
+                        x = rearrange(x, 'B C N -> B N C')          # (B, C, N) -> (B, N, C), where C = p**2 * C_in
+                    x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
+
+                    for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
+                        x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c, mask, freqs_cos, freqs_sin, global_adaln)  
+
+                    x = self.final_layer(x, c)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
+
+                    if self.fourier_basis is not None:
+                        coeff_cos, coeff_sin = x.chunk(2, dim=-1)
+                        x = coeff_cos * cos_basis + coeff_sin * sin_basis
+
+                    x = x * mask[..., None]                         # mask the padding tokens
+                    if not self.use_sit:
+                        x = rearrange(x, 'B N C -> B C N')          # (B, N, C) -> (B, C, N), where C = p**2 * C_out
+                    
+                    x_cond, x_uncond = x.chunk(2, dim=0)
+                    x = x_uncond + cfg * (x_cond - x_uncond)
+                    x = (sigma_list[step+1] - sigma_list[step]) * x + residual
+        return x
         
     def ckpt_wrapper(self, module):
         def ckpt_forward(*inputs):

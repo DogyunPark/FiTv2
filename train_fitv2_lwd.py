@@ -406,7 +406,12 @@ def main():
     #scheduler.set_timesteps(num_inference_steps, device=device)
     #timesteps = scheduler.timesteps
     #sigmas = scheduler.sigmas
-    sigmas = torch.linspace(0, 1, number_of_perflow+1).to(device)
+    #sigmas = torch.linspace(0, 1, number_of_perflow+1).to(device)
+    weights = torch.arange(1, number_of_perflow+1)
+    total_weight = weights.sum()
+    segment_length = weights / total_weight
+    sigmas = torch.cat((torch.tensor([0.0]), torch.cumsum(segment_length, dim=0)))
+    sigmas = sigmas.to(device=device)
     logger.info(f"Sigmas: {sigmas}")
 
     # update ema
@@ -659,7 +664,8 @@ def main():
 
         if args.reflow:
             xt_input = x0 * (1-ratio) + x * ratio
-            per_flow_ratio = torch.randint(0, 1000, (x.shape[0],)) / 1000
+            #per_flow_ratio = torch.randint(0, 1000, (x.shape[0],)) / 1000
+            per_flow_ratio = torch.rand(x.shape[0]).to(device=device)
             per_flow_ratio = per_flow_ratio.to(device=device)
             t_input = sigma_current + per_flow_ratio.clone() * (sigma_next - sigma_current)
             while len(per_flow_ratio.shape) < x0.ndim:
@@ -864,7 +870,8 @@ def main():
                             samples = ema_model.module.unpatchify(samples, (H, W))
                         else:
                             samples = ema_model.unpatchify(samples, (H, W))
-                        samples = samples.clamp(-1, 1)     
+                        samples = samples.to(torch.bfloat16)     
+                        samples = vae.decode(samples / vae.config.scaling_factor).sample
                         samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
                         arr = samples.cpu().numpy()
                         arr_list.append(arr)
@@ -875,7 +882,7 @@ def main():
                     inception_score = evaluator.compute_inception_score(sample_acts[0])
                     fid = sample_stats.frechet_distance(ref_stats)
                     sfid = sample_stats_spatial.frechet_distance(ref_stats_spatial)
-                    prec, recall = evaluator.compute_precision_recall(ref_acts[0], sample_acts[0])
+                    prec, recall = evaluator.compute_prec_recall(ref_acts[0], sample_acts[0])
                     logger.info(f"Inception Score: {inception_score}")
                     logger.info(f"FID: {fid}")
                     logger.info(f"Spatial FID: {sfid}")
@@ -887,8 +894,8 @@ def main():
                         accelerator.log({"sfid": sfid}, step=global_steps)
                         accelerator.log({"prec": prec}, step=global_steps)
                         accelerator.log({"recall": recall}, step=global_steps)
-            accelerator.wait_for_everyone()
-            
+                accelerator.end_training()
+
         logs = {"step_loss": loss.detach().item(), 
                 "lr": lr_scheduler.get_last_lr()[0]}
         progress_bar.set_postfix(**logs)

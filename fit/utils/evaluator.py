@@ -101,6 +101,12 @@ class Evaluator:
     def read_activations(self, arr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         return self.compute_activations(arr)
 
+    def read_activations_npz(self, npz_path: str) -> Tuple[np.ndarray, np.ndarray]:
+        batches = np.load(npz_path)
+        if npz_path.split('.')[-1] == 'npz':
+            batches = batches['arr_0']
+        return self.compute_activations(batches)
+
     def compute_activations(self, batches) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute image features for downstream evals.
