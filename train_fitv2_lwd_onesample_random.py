@@ -42,7 +42,7 @@ from fit.utils.utils import (
     update_ema,
     
 )
-from fit.utils.eval_utils import init_from_ckpt, calculate_inception_stats_imagenet
+from fit.utils.eval_utils import init_from_ckpt
 from fit.utils.lr_scheduler import get_scheduler
 from fit.model.fit_model import FiTBlock
 from fit.model.modules import FinalLayer, PatchEmbedder, TimestepEmbedder, LabelEmbedder
@@ -55,6 +55,11 @@ from fit.scheduler.transport.utils import loss_func_huber
 from fit.utils.utils import bell_shaped_sample
 
 logger = get_logger(__name__, log_level="INFO")
+
+def cycle(dl):
+    while True:
+        for data in dl:
+            yield data
 
 # For Omegaconf Tuple
 def resolve_tuple(*args):
@@ -137,7 +142,7 @@ def parse_args():
     parser.add_argument(
         "--ema_decay",
         type=float,
-        default=0.999,
+        default=0.9999,
         help="The decay rate for ema."
     )
     parser.add_argument(
@@ -205,24 +210,6 @@ def parse_args():
         action="store_true",
         default=False,
         help="Whether to use distillation."
-    )
-    parser.add_argument(
-        "--eval_fid",
-        action="store_true",
-        default=False,
-        help="Whether to evaluate FID."
-    )
-    parser.add_argument(
-        "--ref_path",
-        type=str,
-        default=None,
-        help="The path to the reference image."
-    )
-    parser.add_argument(
-        "--eval_fid_num_samples",
-        type=int,
-        default=5000,
-        help="The number of samples to evaluate FID."
     )
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     args = parser.parse_args()
@@ -362,8 +349,8 @@ def main():
         diffusers.utils.logging.set_verbosity_error()
         diffusers.utils.logging.set_verbosity_error()
     
-    # if args.seed is not None:
-    #     set_seed(args.seed)
+    if args.seed is not None:
+        set_seed(args.seed)
 
     if args.allow_tf32: # for A100
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -490,6 +477,8 @@ def main():
     optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         optimizer, train_dataloader, lr_scheduler
     )
+
+    train_dataloader = cycle(train_dataloader)
     
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
@@ -509,29 +498,16 @@ def main():
     if args.use_elpips:
         elatentlpips = ELatentLPIPS(encoder="sd15", augment='bg').to(device).eval()
     
-    if accelerator.is_main_process and args.eval_fid:
-        assert args.ref_path is not None, "Reference path is not provided."
-        print('Loading Inception-v3 model...')
-        detector_url = 'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl'
-        detector_kwargs = dict(return_features=True)
-        feature_dim = 2048
-        with dnnlib.util.open_url(detector_url, verbose=(0 == 0)) as f:
-            detector_net = pickle.load(f).to(device)
-        with dnnlib.util.open_url(args.ref_path) as f:
-            ref = dict(np.load(f))
-        mu_ref = ref['mu']
-        sigma_ref = ref['sigma']
-
     # Train!
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {train_len}")
+    #logger.info(f"  Num examples = {train_len}")
     logger.info(f"  Instantaneous batch size per device = {data_cfg.params.train.loader.batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Learning rate = {learning_rate}")
     logger.info(f"  Gradient Accumulation steps = {grad_accu_steps}")
     logger.info(f"  Total optimization steps = {accelerate_cfg.max_train_steps}")
     logger.info(f"  Current optimization steps = {global_steps}")
-    logger.info(f"  Train dataloader length = {len(train_dataloader)} ")
+    #logger.info(f"  Train dataloader length = {len(train_dataloader)} ")
     logger.info(f"  Training Mixed-Precision = {accelerate_cfg.mixed_precision}")
 
     # Potentially load in the weights and states from a previous save
@@ -544,7 +520,6 @@ def main():
             try:
                 logger.info(f"Resuming from checkpoint {resume_from_path}")
                 accelerator.load_state(os.path.join(ckptdir, resume_from_path))
-                #accelerator.load_state(os.path.join(ckptdir, ' LWD/fitv2_perflow_9/checkpoints/checkpoint-55000'))
                 break
             except (RuntimeError, Exception) as err:
                 error_times+=1
@@ -573,22 +548,22 @@ def main():
     model.train()
     train_loss = 0.0
 
-    test_batch_size = 4
+    test_batch_size = 3
     n_patch_h, n_patch_w = 16, 16
     H, W = n_patch_h * 2, n_patch_w * 2
     print('Generating images with resolution: ', H*8, 'x', W*8)
     y_test = torch.randint(0, 1000, (test_batch_size,), device=device)
     noise_test = torch.randn((test_batch_size, n_patch_h*n_patch_w, (2**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
+    x0 = noise_test.clone()
 
-    for step, batch in enumerate(train_dataloader, start=global_steps):
-        for batch_key in batch.keys():
-            if not isinstance(batch[batch_key], list):
-                batch[batch_key] = batch[batch_key].to(device=device)
+    #for step, batch in enumerate(train_dataloader, start=global_steps):
+    for step in range(global_steps, accelerate_cfg.max_train_steps):
+        batch = next(train_dataloader)
         x = batch['feature']        # (B, N, C)
         grid = batch['grid']        # (B, 2, N)
         mask = batch['mask']        # (B, N)
         y = batch['label']          # (B, 1)
-        size = batch['size']        # (B, N_pack, 2), order: h, w. When pack is not used, N_pack=1.
+        size = batch['size']        # (B, N_pack, 2), order: h, w. When pack is not used, N_pack=1.                
 
         N_batch = int(torch.max(torch.sum(size[..., 0] * size[..., 1], dim=-1)))
         x, grid, mask = x[:, : N_batch], grid[..., : N_batch], mask[:, : N_batch]
@@ -596,14 +571,13 @@ def main():
         # prepare other parameters
         y = y.squeeze(dim=-1).to(torch.int)
 
-        #cfg_scale = torch.randint(1, 5, (1,))
-        cfg_scale = torch.tensor([4.0])
+        cfg_scale = torch.randint(1, 2, (1,))
         cfg_scale_cond = cfg_scale.expand(x.shape[0]).to(device=device)
 
         layer_idx = torch.randint(0, number_of_perflow, (1,)).item()
+        #layer_idx = bell_shaped_sample(0, number_of_perflow, 5, 1, 3)
 
         model_kwargs = dict(y=y, grid=grid.long(), mask=mask, size=size, target_layer_start=layer_idx * number_of_layers_for_perflow, target_layer_end=layer_idx * number_of_layers_for_perflow + number_of_layers_for_perflow)
-        #model_kwargs = dict(y=y, grid=grid.long(), mask=mask, size=size, target_layer_start=(layer_idx-1) * number_of_layers_for_perflow, target_layer_end=(layer_idx-1) * number_of_layers_for_perflow + number_of_layers_for_perflow)
 
         t = sigmas[layer_idx]
 
@@ -624,7 +598,6 @@ def main():
         
         sigma_list = torch.linspace(sigma_current.item(), sigma_next.item(), perflow_solver_step+1)
 
-        x0 = torch.randn_like(x)
         ratio = t.clone()
         while len(ratio.shape) < x0.ndim:
             ratio = ratio.unsqueeze(-1)
@@ -639,18 +612,35 @@ def main():
                 size_cfg = torch.cat([size, size], dim=0)
                 model_kwargs_cfg = dict(y=y_cfg, grid=grid_cfg.long(), mask=mask_cfg, size=size_cfg)
 
-                for i in range(perflow_solver_step, 0, -1):
-                    sigma_previous_i = sigma_list[i-1]
+                for i in range(perflow_solver_step):
+                    sigma_next_i = sigma_list[i+1]
                     sigma_current_i = sigma_list[i]
                     t_cfg = sigma_current_i.repeat(x.shape[0]*2).to(device=device)
                     x_input = torch.cat([xt, xt], dim=0)
                     model_output = pretrained_model(x_input, t_cfg, **model_kwargs_cfg)
 
                     C_cfg = 3 * 2 * 2
+                    #eps, rest = model_output[:, :, :C_cfg], model_output[:, :, C_cfg:]
                     noise_pred_cond, noise_pred_uncond = model_output.chunk(2, dim=0)
                     noise_pred = noise_pred_uncond + cfg_scale.to(device=device) * (noise_pred_cond - noise_pred_uncond)
-                    xt = xt + (sigma_previous_i - sigma_current_i) * noise_pred
-
+                    #eps = torch.cat([half_eps, half_eps], dim=0)
+                    #noise_pred = torch.cat([eps, rest], dim=2)
+                    #noise_pred, _ = noise_pred.chunk(2, dim=0)
+                    xt = xt + (sigma_next_i - sigma_current_i) * noise_pred
+                
+                # for idx, sample in enumerate(xt):
+                #     sample = sample.unsqueeze(0)
+                #     samples = sample[:, : size[idx, :, 0].item() * size[idx, :, 1].item()]
+                #     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                #         samples = model.module.unpatchify(samples, (size[idx, :, 0].item()*2, size[idx, :, 1].item()*2))
+                #     else:
+                #         samples = model.unpatchify(samples, (size[idx, :, 0].item()*2, size[idx, :, 1].item()*2))
+                #     samples = samples.to(torch.bfloat16)     
+                #     samples = vae.decode(samples / vae.config.scaling_factor).sample
+                #     samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
+                #     for i, img_tensor in enumerate(samples):
+                #         img = Image.fromarray(img_tensor.cpu().numpy())
+                #         img.save(os.path.join("./samples_fit", f"fitv2_sample_{i}.jpg"))
         else:
             ratio_next = sigma_next.clone()
             while len(ratio_next.shape) < x0.ndim:
@@ -659,7 +649,7 @@ def main():
 
         if args.reflow:
             xt_input = x0 * (1-ratio) + x * ratio
-            per_flow_ratio = torch.randint(0, 1000, (x.shape[0],)) / 1000
+            per_flow_ratio = torch.randint(0, 100, (x.shape[0],)) / 100
             per_flow_ratio = per_flow_ratio.to(device=device)
             t_input = sigma_current + per_flow_ratio.clone() * (sigma_next - sigma_current)
             while len(per_flow_ratio.shape) < x0.ndim:
@@ -669,7 +659,7 @@ def main():
             weight = 1.
         else:
             x_input = x0 * (1-ratio) + x * ratio
-            target = (xt - x_input) / (sigma_next - sigma_current)  
+            target = (xt - x_input) / (sigma_next - sigma_current)
             t_input = sigma_current.repeat(x.shape[0]).to(device=device)
             weight = 1.
 
@@ -687,12 +677,20 @@ def main():
                     pred_model = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
                 else:
                     pred_model = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                
+                # if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                #     pred_model_x1 = model.module.forward_run_layer_from_target_layer(xt_input, t_current, t_next, cfg_scale_cond, **model_kwargs)
+                # else:   
+                #     pred_model_x1 = model.forward_run_layer_from_target_layer(xt_input, t_current, t_next, cfg_scale_cond, **model_kwargs)
+                #loss_dict = transport.training_losses(model, x, model_kwargs)
 
             losses = mean_flat((((pred_model - target)*mask) ** 2)) * ratio * weight
+            #losses = mean_flat((((pred_model - noise_pred)*mask) ** 2)) * ratio
+            #losses = mean_flat(loss_func_huber(pred_model, target_per_flow)*mask) * ratio
             loss = losses.mean()
 
             if args.consistency_loss:
-                t_plus_input = sigma_next.repeat(x.shape[0]).to(device=device)
+                t_plus_input = sigma_next_i.repeat(x.shape[0]).to(device=device)
                 if isinstance(model, torch.nn.parallel.DistributedDataParallel):
                     pred_model_xt = model.module.forward_run_layer_from_target_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, number_of_layers_for_perflow=number_of_layers_for_perflow)
 
@@ -774,7 +772,7 @@ def main():
                 accelerator.wait_for_everyone()
             
             if global_steps % accelerate_cfg.evaluation_steps == 0:
-                ema_model.eval()
+                model.eval()
                 with torch.no_grad():
                     # prepare for x
                     grid_h = torch.arange(n_patch_h, dtype=torch.long)
@@ -787,20 +785,18 @@ def main():
                     size_test = torch.tensor((n_patch_h, n_patch_w)).repeat(test_batch_size,1).to(device=device, dtype=torch.long)
                     size_test = size_test[:, None, :]
 
-                    model_kwargs_test = dict(y=y_test, grid=grid_test.long(), mask=mask_test, size=size_test)
+                    model_kwargs_test = dict(y=y, grid=grid_test.long(), mask=mask_test, size=size_test)
 
-                    cfg_scale_test = 4 * torch.ones(1)
+                    cfg_scale_test = 1 * torch.ones(1)
                     cfg_scale_cond_test = cfg_scale_test.expand(noise_test.shape[0]).to(device=device)
                     t_test = torch.zeros_like(cfg_scale_cond_test)
-
-                    with accelerator.autocast():
-                        output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test)
+                    output_test = model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, number_of_layers_for_perflow=number_of_layers_for_perflow)
 
                     samples = output_test[..., : n_patch_h*n_patch_w]
-                    if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                        samples = ema_model.module.unpatchify(samples, (H, W))
+                    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                        samples = model.module.unpatchify(samples, (H, W))
                     else:
-                        samples = ema_model.unpatchify(samples, (H, W))
+                        samples = model.unpatchify(samples, (H, W))
                     samples = samples.to(torch.bfloat16)     
                     samples = vae.decode(samples / vae.config.scaling_factor).sample
                     samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
@@ -809,86 +805,8 @@ def main():
                         for i, img_tensor in enumerate(samples):
                             img = Image.fromarray(img_tensor.cpu().numpy())
                             img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-{i}.jpg"))
-                    
-                    # CFG Sampling
-                    with accelerator.autocast():
-                        if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 4, **model_kwargs_test, number_of_step_perflow=10)
-                        else:
-                            output_test = ema_model.forward_cfg(noise_test, t_test, 4, **model_kwargs_test, number_of_step_perflow=10)
+                model.train()
 
-                    samples = output_test[..., : n_patch_h*n_patch_w]
-                    if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                        samples = ema_model.module.unpatchify(samples, (H, W))
-                    else:
-                        samples = ema_model.unpatchify(samples, (H, W))
-                    samples = samples.to(torch.bfloat16)     
-                    samples = vae.decode(samples / vae.config.scaling_factor).sample
-                    samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
-                    
-                    if accelerator.is_main_process:
-                        for i, img_tensor in enumerate(samples):
-                            img = Image.fromarray(img_tensor.cpu().numpy())
-                            img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-{i}-NFE10.jpg"))
-            
-            if args.eval_fid and global_steps % accelerate_cfg.eval_fid_steps == 0 and global_steps > 50000 and accelerator.is_main_process:
-                with torch.no_grad():
-                    number = 0
-                    arr_list = []
-                    test_fid_batch_size = 50
-
-                    grid_h = torch.arange(n_patch_h, dtype=torch.long)
-                    grid_w = torch.arange(n_patch_w, dtype=torch.long)
-                    grid_test = torch.meshgrid(grid_w, grid_h, indexing='xy')
-                    grid_test = torch.cat(
-                        [grid_test[0].reshape(1,-1), grid_test[1].reshape(1,-1)], dim=0
-                    ).repeat(test_fid_batch_size,1,1).to(device=device, dtype=torch.long)
-                    mask_test = torch.ones(test_fid_batch_size, n_patch_h*n_patch_w).to(device=device, dtype=torch.bfloat16)
-                    size_test = torch.tensor((n_patch_h, n_patch_w)).repeat(test_fid_batch_size,1).to(device=device, dtype=torch.long)
-                    size_test = size_test[:, None, :]
-
-                    while args.eval_fid_num_samples > number:
-                        latents = torch.randn((test_fid_batch_size, n_patch_h*n_patch_w, (2**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
-                        y = torch.randint(0, 1000, (test_fid_batch_size,), device=device)
-
-                        model_kwargs_fid = dict(y=y, grid=grid_test.long(), mask=mask_test, size=size_test)
-
-                        with accelerator.autocast():
-                            if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                                output_test = ema_model.module.forward_cfg(latents, t_test, 1.5, **model_kwargs_fid, number_of_step_perflow=5)
-                            else:
-                                output_test = ema_model.forward_cfg(latents, t_test, 1.5, **model_kwargs_fid, number_of_step_perflow=5)
-
-                        samples = output_test[:, : n_patch_h*n_patch_w]
-                        if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                            samples = ema_model.module.unpatchify(samples, (H, W))
-                        else:
-                            samples = ema_model.unpatchify(samples, (H, W))
-                        samples = samples.clamp(-1, 1)     
-                        samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
-                        arr = samples.cpu().numpy()
-                        arr_list.append(arr)
-                        number += arr.shape[0]
-                    
-                    arr_list = np.concatenate(arr_list, axis=0)
-                    sample_acts, sample_stats, sample_stats_spatial = calculate_inception_stats_imagenet(arr_list, evaluator)
-                    inception_score = evaluator.compute_inception_score(sample_acts[0])
-                    fid = sample_stats.frechet_distance(ref_stats)
-                    sfid = sample_stats_spatial.frechet_distance(ref_stats_spatial)
-                    prec, recall = evaluator.compute_precision_recall(ref_acts[0], sample_acts[0])
-                    logger.info(f"Inception Score: {inception_score}")
-                    logger.info(f"FID: {fid}")
-                    logger.info(f"Spatial FID: {sfid}")
-                    logger.info(f"Precision: {prec}")
-                    logger.info(f"Recall: {recall}")
-                    if getattr(accelerate_cfg, 'logger', 'wandb') != None:
-                        accelerator.log({"inception_score": inception_score}, step=global_steps)
-                        accelerator.log({"fid": fid}, step=global_steps)
-                        accelerator.log({"sfid": sfid}, step=global_steps)
-                        accelerator.log({"prec": prec}, step=global_steps)
-                        accelerator.log({"recall": recall}, step=global_steps)
-            accelerator.wait_for_everyone()
-            
         logs = {"step_loss": loss.detach().item(), 
                 "lr": lr_scheduler.get_last_lr()[0]}
         progress_bar.set_postfix(**logs)

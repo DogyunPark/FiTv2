@@ -2,6 +2,8 @@ import importlib
 import torch
 from came_pytorch import CAME
 from collections import OrderedDict
+import numpy as np
+from math import exp
 
 def get_obj_from_str(string, reload=False, invalidate_cache=True):
     module, cls = string.rsplit(".", 1)
@@ -50,3 +52,21 @@ def default(val, d):
         return val
     return d() if isfunction(d) else d
 
+
+def bell_shaped_sample(low=0, high=20, peak=10, size=10, sigma=3.0):
+    """
+    Samples from a (truncated) discrete approximation to a normal distribution
+    centered around 'peak' with standard deviation 'sigma'.
+    """
+    x = np.arange(low, high+1)
+    
+    # Compute approximate normal PDF values, centered at 'peak'
+    # (We’ll just use the formula and then normalize.)
+    weights = np.array([
+        exp(-0.5 * ((val - peak)/sigma)**2) for val in x
+    ], dtype=float)
+    
+    weights /= weights.sum()  # normalize
+    
+    samples = np.random.choice(x, size=size, p=weights)
+    return samples

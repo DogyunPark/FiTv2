@@ -54,7 +54,7 @@ diffusion:
       # finetune: partial
   
   distillation_network_config:
-    target: fit.model.fit_model_lwd.FiTLwD
+    target: fit.model.fit_model_lwd_shared.FiTLwD
     params:
       context_size: 256
       patch_size: 2
@@ -80,7 +80,6 @@ diffusion:
       number_of_perflow: 10
       overlap: false
       fourier_basis: false
-      perlayer_embedder: false
 data:
   target: fit.data.in1k_latent_dataset.INLatentLoader
   params:
@@ -88,12 +87,11 @@ data:
       #data_path: datasets/imagenet1k_latents_256_sd_vae_ft_ema_one_sample
       data_path: datasets/imagenet1k_latents_256_sd_vae_ft_ema
       target_len: 256
-      random: 'random'
+      random: 'crop'
       loader:
-        batch_size: 128
+        batch_size: 64
         num_workers: 8
         shuffle: true
-
 
 accelerate:
   # others

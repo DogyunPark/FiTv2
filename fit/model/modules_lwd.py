@@ -294,3 +294,17 @@ class FinalLayer(nn.Module):
         x = modulate(self.norm_final(x), shift, scale)
         x = self.linear(x)
         return x
+
+class FinalLayer_nomodulation(nn.Module):
+    """
+    The final layer of DiT.
+    """
+    def __init__(self, hidden_size, patch_size, out_channels, norm_layer: str = 'layernorm', adaln_bias=True, adaln_type='normal'):
+        super().__init__()
+        self.norm_final = create_norm(norm_type=norm_layer, dim=hidden_size)
+        self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
+        
+    def forward(self, x, c):
+        x = self.norm_final(x)
+        x = self.linear(x)
+        return x
