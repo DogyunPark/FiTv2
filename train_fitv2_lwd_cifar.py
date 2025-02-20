@@ -43,8 +43,7 @@ from fit.utils.utils import (
     update_ema,
     
 )
-from fit.utils.utils import bell_shaped_sample, discrete_lognormal_sample
-from fit.utils.eval_utils import init_from_ckpt, compute_fid, calculate_inception_stats
+from fit.utils.eval_utils import init_from_ckpt, compute_fid, calculate_inception_stats_cifar
 from fit.utils.lr_scheduler import get_scheduler
 from fit.model.fit_model import FiTBlock
 from fit.model.modules import FinalLayer, PatchEmbedder, TimestepEmbedder, LabelEmbedder
@@ -962,7 +961,7 @@ def main():
                         number += arr.shape[0]
                     
                     arr_list = np.concatenate(arr_list, axis=0)
-                    mu, sigma = calculate_inception_stats(arr_list, 'cifar10', detector_net=detector_net, detector_kwargs=detector_kwargs, device=device)
+                    mu, sigma = calculate_inception_stats_cifar(arr_list, 'cifar10', detector_net=detector_net, detector_kwargs=detector_kwargs, device=device)
                     fid = compute_fid(mu, sigma, ref_mu=mu_ref, ref_sigma=sigma_ref)
                     logger.info(f"FID: {fid}")
                     if getattr(accelerate_cfg, 'logger', 'wandb') != None:
