@@ -26,3 +26,5 @@ batch*
 /datasets
 /LWD
 /samples_fit
+
+*.pb
