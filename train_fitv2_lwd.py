@@ -52,7 +52,10 @@ from came_pytorch import CAME
 from PIL import Image
 from elatentlpips import ELatentLPIPS
 from fit.scheduler.transport.utils import loss_func_huber
-from fit.utils.utils import bell_shaped_sample
+from fit.utils.utils import bell_shaped_sample, symmetric_segment_division, linear_increase_division
+from fit.utils.evaluator import Evaluator
+import tensorflow.compat.v1 as tf
+
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -407,10 +410,8 @@ def main():
     #timesteps = scheduler.timesteps
     #sigmas = scheduler.sigmas
     #sigmas = torch.linspace(0, 1, number_of_perflow+1).to(device)
-    weights = torch.arange(1, number_of_perflow+1)
-    total_weight = weights.sum()
-    segment_length = weights / total_weight
-    sigmas = torch.cat((torch.tensor([0.0]), torch.cumsum(segment_length, dim=0)))
+    sigmas = linear_increase_division(number_of_perflow)
+    #sigmas = symmetric_segment_division(number_of_perflow)
     sigmas = sigmas.to(device=device)
     logger.info(f"Sigmas: {sigmas}")
 
@@ -515,17 +516,17 @@ def main():
         elatentlpips = ELatentLPIPS(encoder="sd15", augment='bg').to(device).eval()
     
     if accelerator.is_main_process and args.eval_fid:
-        assert args.ref_path is not None, "Reference path is not provided."
-        print('Loading Inception-v3 model...')
-        detector_url = 'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl'
-        detector_kwargs = dict(return_features=True)
-        feature_dim = 2048
-        with dnnlib.util.open_url(detector_url, verbose=(0 == 0)) as f:
-            detector_net = pickle.load(f).to(device)
-        with dnnlib.util.open_url(args.ref_path) as f:
-            ref = dict(np.load(f))
-        mu_ref = ref['mu']
-        sigma_ref = ref['sigma']
+        hf_config = tf.ConfigProto(
+            allow_soft_placement=True  # allows DecodeJpeg to run on CPU in Inception graph
+        )
+        hf_config.gpu_options.allow_growth = True
+        hf_config.gpu_options.per_process_gpu_memory_fraction = 0.1
+        evaluator = Evaluator(tf.Session(config=hf_config), batch_size=20)
+        ref_acts = evaluator.read_activations_npz(args.ref_path)
+        ref_stats, ref_stats_spatial = evaluator.read_statistics(args.ref_path, ref_acts)
+            
+    torch.cuda.empty_cache()
+    tf.reset_default_graph()
 
     # Train!
     logger.info("***** Running training *****")
@@ -605,130 +606,134 @@ def main():
         cfg_scale = torch.tensor([4.0])
         cfg_scale_cond = cfg_scale.expand(x.shape[0]).to(device=device)
 
-        layer_idx = torch.randint(0, number_of_perflow, (1,)).item()
+        loss = 0.0
+        for layer_idx in range(number_of_perflow):
+        #layer_idx = torch.randint(0, number_of_perflow, (1,)).item()
 
-        model_kwargs = dict(y=y, grid=grid.long(), mask=mask, size=size, target_layer_start=layer_idx * number_of_layers_for_perflow, target_layer_end=layer_idx * number_of_layers_for_perflow + number_of_layers_for_perflow)
-        #model_kwargs = dict(y=y, grid=grid.long(), mask=mask, size=size, target_layer_start=(layer_idx-1) * number_of_layers_for_perflow, target_layer_end=(layer_idx-1) * number_of_layers_for_perflow + number_of_layers_for_perflow)
+            model_kwargs = dict(y=y, grid=grid.long(), mask=mask, size=size, target_layer_start=layer_idx * number_of_layers_for_perflow, target_layer_end=layer_idx * number_of_layers_for_perflow + number_of_layers_for_perflow)
+            #model_kwargs = dict(y=y, grid=grid.long(), mask=mask, size=size, target_layer_start=(layer_idx-1) * number_of_layers_for_perflow, target_layer_end=(layer_idx-1) * number_of_layers_for_perflow + number_of_layers_for_perflow)
 
-        t = sigmas[layer_idx]
-
-        if args.overlap:
-            if layer_idx == number_of_perflow - 1:
-                sigma_next = sigmas[layer_idx + 1]
-            else:
-                sigma_next = sigmas[layer_idx + 1] + 1/(number_of_perflow * 5)
-        else:
             sigma_next = sigmas[layer_idx + 1]
-
-        sigma_current = sigmas[layer_idx]
-
-        if args.random_perflow_step:
-            perflow_solver_step = torch.randint(1, solver_step+1, (1,)).item()
-        else:
-            perflow_solver_step = solver_step
-        
-        sigma_list = torch.linspace(sigma_current.item(), sigma_next.item(), perflow_solver_step+1)
-
-        x0 = torch.randn_like(x)
-        ratio = t.clone()
-        while len(ratio.shape) < x0.ndim:
-            ratio = ratio.unsqueeze(-1)
-        xt = x0 * (1-ratio) + x * ratio
-
-        if args.distillation:
-            with torch.no_grad():
-                y_null = torch.tensor([1000] * x.shape[0], device=device)
-                y_cfg = torch.cat([y, y_null], dim=0)
-                grid_cfg = torch.cat([grid, grid], dim=0)
-                mask_cfg = torch.cat([mask, mask], dim=0)
-                size_cfg = torch.cat([size, size], dim=0)
-                model_kwargs_cfg = dict(y=y_cfg, grid=grid_cfg.long(), mask=mask_cfg, size=size_cfg)
-
-                for i in range(perflow_solver_step, 0, -1):
-                    sigma_previous_i = sigma_list[i-1]
-                    sigma_current_i = sigma_list[i]
-                    t_cfg = sigma_current_i.repeat(x.shape[0]*2).to(device=device)
-                    x_input = torch.cat([xt, xt], dim=0)
-                    model_output = pretrained_model(x_input, t_cfg, **model_kwargs_cfg)
-
-                    C_cfg = 3 * 2 * 2
-                    noise_pred_cond, noise_pred_uncond = model_output.chunk(2, dim=0)
-                    noise_pred = noise_pred_uncond + cfg_scale.to(device=device) * (noise_pred_cond - noise_pred_uncond)
-                    xt = xt + (sigma_previous_i - sigma_current_i) * noise_pred
-
-        else:
-            ratio_next = sigma_next.clone()
-            while len(ratio_next.shape) < x0.ndim:
-                ratio_next = ratio_next.unsqueeze(-1)
-            xt = x0 * (1-ratio_next) + x * ratio_next
-
-        if args.reflow:
-            xt_input = x0 * (1-ratio) + x * ratio
-            #per_flow_ratio = torch.randint(0, 1000, (x.shape[0],)) / 1000
-            per_flow_ratio = torch.rand(x.shape[0]).to(device=device)
-            per_flow_ratio = per_flow_ratio.to(device=device)
-            t_input = sigma_current + per_flow_ratio.clone() * (sigma_next - sigma_current)
-            while len(per_flow_ratio.shape) < x0.ndim:
-                per_flow_ratio = per_flow_ratio.unsqueeze(-1)
-            x_input = xt_input * (1-per_flow_ratio) + xt * per_flow_ratio
-            target = (xt - xt_input) / (sigma_next - sigma_current)
-            weight = 1.
-        else:
-            x_input = x0 * (1-ratio) + x * ratio
-            target = (xt - x_input) / (sigma_next - sigma_current)  
-            t_input = sigma_current.repeat(x.shape[0]).to(device=device)
-            weight = 1.
-
-        if diffusion_cfg.distillation_network_config.params.fourier_basis:
-            t_next = sigma_next.repeat(x.shape[0]).to(device=device)
-        else:
-            t_next = None
-
-        with accelerator.accumulate(model):
-            # save memory for x, grid, mask
-            # forward model and compute loss
-            with accelerator.autocast():
-                mask, ratio = get_flexible_mask_and_ratio(model_kwargs, x)
-                if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                    pred_model = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+            if args.overlap:
+                if layer_idx == 0:
+                    sigma_current = sigmas[layer_idx]
                 else:
-                    pred_model = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                    sigma_current = sigmas[layer_idx] - 1/(number_of_perflow*2)
+            else:
+                sigma_current = sigmas[layer_idx]
 
-            losses = mean_flat((((pred_model - target)*mask) ** 2)) * ratio * weight
-            loss = losses.mean()
+            if args.random_perflow_step:
+                perflow_solver_step = torch.randint(1, solver_step+1, (1,)).item()
+            else:
+                perflow_solver_step = solver_step
+            
+            sigma_list = torch.linspace(sigma_current.item(), sigma_next.item(), perflow_solver_step+1)
 
-            if args.consistency_loss:
-                t_plus_input = sigma_next.repeat(x.shape[0]).to(device=device)
-                if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                    pred_model_xt = model.module.forward_run_layer_from_target_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, number_of_layers_for_perflow=number_of_layers_for_perflow)
+            x0 = torch.randn_like(x)
+            ratio = sigma_current.clone()
+            while len(ratio.shape) < x0.ndim:
+                ratio = ratio.unsqueeze(-1)
+            xt = x0 * (1-ratio) + x * ratio
 
-                    model_kwargs_xt_plus = model_kwargs.copy()
-                    model_kwargs_xt_plus['target_layer_start'] = (layer_idx + 1) * number_of_layers_for_perflow
-                    with torch.no_grad():
-                        pred_model_xt_plus = model.module.forward_run_layer_from_target_layer(xt, t_plus_input, cfg_scale_cond, **model_kwargs_xt_plus, number_of_layers_for_perflow=number_of_layers_for_perflow).detach()
-                else:
-                    pred_model_xt = model.forward_run_layer_from_target_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, number_of_layers_for_perflow=number_of_layers_for_perflow)
+            if args.distillation:
+                with torch.no_grad():
+                    y_null = torch.tensor([1000] * x.shape[0], device=device)
+                    y_cfg = torch.cat([y, y_null], dim=0)
+                    grid_cfg = torch.cat([grid, grid], dim=0)
+                    mask_cfg = torch.cat([mask, mask], dim=0)
+                    size_cfg = torch.cat([size, size], dim=0)
+                    model_kwargs_cfg = dict(y=y_cfg, grid=grid_cfg.long(), mask=mask_cfg, size=size_cfg)
 
-                    model_kwargs_xt_plus = model_kwargs.copy()
-                    model_kwargs_xt_plus['target_layer_start'] = (layer_idx + 1) * number_of_layers_for_perflow
-                    with torch.no_grad():
-                        pred_model_xt_plus = model.forward_run_layer_from_target_layer(xt, t_plus_input, cfg_scale_cond, **model_kwargs_xt_plus, number_of_layers_for_perflow=number_of_layers_for_perflow).detach()
+                    for i in range(solver_step):
+                        #sigma_previous_i = sigma_list[i-1]
+                        sigma_current_i = sigma_list[i]
+                        sigma_next_i = sigma_list[i+1]
+                        t_cfg = sigma_current_i.repeat(x.shape[0]*2).to(device=device)
+                        x_input = torch.cat([xt, xt], dim=0)
+                        model_output = pretrained_model(x_input, t_cfg, **model_kwargs_cfg)
 
-                loss_consistency = mean_flat((((pred_model_xt_plus - pred_model_xt)*mask) ** 2)) * ratio * weight
-                loss += 0.5*loss_consistency.mean()
+                        C_cfg = 3 * 2 * 2
+                        noise_pred_cond, noise_pred_uncond = model_output.chunk(2, dim=0)
+                        noise_pred = noise_pred_uncond + cfg_scale.to(device=device) * (noise_pred_cond - noise_pred_uncond)
+                        xt = xt + (sigma_next_i - sigma_current_i) * noise_pred
 
-            # Backpropagate
-            optimizer.zero_grad()
-            accelerator.backward(loss)
-            if accelerator.sync_gradients and accelerate_cfg.max_grad_norm > 0.:
-                all_norm = accelerator.clip_grad_norm_(
-                    model.parameters(), accelerate_cfg.max_grad_norm
-                )
-            optimizer.step()
-            lr_scheduler.step()
-            # Gather the losses across all processes for logging (if we use distributed training).
-            avg_loss = accelerator.gather(loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
-            train_loss += avg_loss.item() / grad_accu_steps
+            else:
+                ratio_next = sigma_next.clone()
+                while len(ratio_next.shape) < x0.ndim:
+                    ratio_next = ratio_next.unsqueeze(-1)
+                xt = x0 * (1-ratio_next) + x * ratio_next
+
+            if args.reflow:
+                xt_input = x0 * (1-ratio) + x * ratio
+                per_flow_ratio = torch.randint(0, 10, (x.shape[0],)) / 10
+                #per_flow_ratio = torch.rand(x.shape[0]).to(device=device)
+                per_flow_ratio = per_flow_ratio.to(device=device)
+                t_input = sigma_current + per_flow_ratio.clone() * (sigma_next - sigma_current)
+                while len(per_flow_ratio.shape) < x0.ndim:
+                    per_flow_ratio = per_flow_ratio.unsqueeze(-1)
+                x_input = xt_input * (1-per_flow_ratio) + xt * per_flow_ratio
+                target = (xt - xt_input) / (sigma_next - sigma_current)
+                weight = 1.
+            else:
+                x_input = x0 * (1-ratio) + x * ratio
+                target = (xt - x_input) / (sigma_next - sigma_current)  
+                t_input = sigma_current.repeat(x.shape[0]).to(device=device)
+                weight = 1.
+
+            if diffusion_cfg.distillation_network_config.params.fourier_basis:
+                t_next = sigma_next.repeat(x.shape[0]).to(device=device)
+            else:
+                t_next = None
+
+            with accelerator.accumulate(model):
+                # save memory for x, grid, mask
+                # forward model and compute loss
+                with accelerator.autocast():
+                    _, _ = get_flexible_mask_and_ratio(model_kwargs, x)
+                    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                        pred_model = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                    else:
+                        pred_model = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+
+                losses = mean_flat((((pred_model - target)) ** 2)) * weight
+                loss += losses.mean()
+
+                if args.consistency_loss:
+                    xt_plus = x0 * (1-ratio_next) + x * ratio_next
+                    xt_current = x0 * (1-ratio) + x * ratio
+                    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                        pred_model_xt = model.module.forward_run_layer_from_target_layer(xt_current, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx)
+                        
+                        if layer_idx == number_of_perflow - 1:
+                            pred_model_xt_plus = x
+                        else:
+                            with torch.no_grad():
+                                pred_model_xt_plus = model.module.forward_run_layer_from_target_layer(xt_plus, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx+1).detach()
+                    else:
+                        pred_model_xt = model.forward_run_layer_from_target_layer(xt_current, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx)
+
+                        if layer_idx == number_of_perflow - 1:
+                            pred_model_xt_plus = x
+                        else:
+                            with torch.no_grad():
+                                pred_model_xt_plus = model.forward_run_layer_from_target_layer(xt_plus, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx+1).detach()
+
+                    loss_consistency = mean_flat((((pred_model_xt_plus - pred_model_xt)) ** 2)) * weight
+                    loss += loss_consistency.mean()
+
+        # Backpropagate
+        loss = loss / number_of_perflow
+        optimizer.zero_grad()
+        accelerator.backward(loss)
+        if accelerator.sync_gradients and accelerate_cfg.max_grad_norm > 0.:
+            all_norm = accelerator.clip_grad_norm_(
+                model.parameters(), accelerate_cfg.max_grad_norm
+            )
+        optimizer.step()
+        lr_scheduler.step()
+        # Gather the losses across all processes for logging (if we use distributed training).
+        avg_loss = accelerator.gather(loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
+        train_loss += avg_loss.item() / grad_accu_steps
 
         # Checks if the accelerator has performed an optimization step behind the scenes; Check gradient accumulation
         if accelerator.sync_gradients: 
@@ -837,11 +842,11 @@ def main():
                             img = Image.fromarray(img_tensor.cpu().numpy())
                             img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-{i}-NFE10.jpg"))
             
-            if args.eval_fid and global_steps % accelerate_cfg.eval_fid_steps == 0 and global_steps > 50000 and accelerator.is_main_process:
+            if args.eval_fid and global_steps % accelerate_cfg.eval_fid_steps == 0 and global_steps > 0 and accelerator.is_main_process:
                 with torch.no_grad():
                     number = 0
                     arr_list = []
-                    test_fid_batch_size = 50
+                    test_fid_batch_size = 25
 
                     grid_h = torch.arange(n_patch_h, dtype=torch.long)
                     grid_w = torch.arange(n_patch_w, dtype=torch.long)
@@ -894,7 +899,7 @@ def main():
                         accelerator.log({"sfid": sfid}, step=global_steps)
                         accelerator.log({"prec": prec}, step=global_steps)
                         accelerator.log({"recall": recall}, step=global_steps)
-                accelerator.end_training()
+            accelerator.wait_for_everyone()
 
         logs = {"step_loss": loss.detach().item(), 
                 "lr": lr_scheduler.get_last_lr()[0]}

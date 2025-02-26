@@ -70,3 +70,28 @@ def bell_shaped_sample(low=0, high=20, peak=10, size=10, sigma=3.0):
     
     samples = np.random.choice(x, size=size, p=weights)
     return samples
+
+def symmetric_segment_division(N):
+    indices = torch.arange(1, N + 1)
+    center = (N + 1) / 2.0
+    
+    # Define weights so that they are highest at the ends and lowest at the center.
+    # This is done by taking the absolute difference from the center and adding 1.
+    # For N=7, weights = [|1-4|+1, |2-4|+1, |3-4|+1, |4-4|+1, |5-4|+1, |6-4|+1, |7-4|+1]
+    #            = [4, 3, 2, 1, 2, 3, 4]
+    weights = torch.abs(indices - center) + 1.0
+    
+    # Compute normalized segment lengths so they sum to 1.
+    segment_lengths = weights / weights.sum()
+    
+    # Compute endpoints by taking the cumulative sum of the segment lengths,
+    # starting from 0.
+    endpoints = torch.cat((torch.tensor([0.0]), torch.cumsum(segment_lengths, dim=0)))
+    return endpoints
+
+def linear_increase_division(N):
+    weights = torch.arange(1, N+1)
+    total_weight = weights.sum()
+    segment_length = weights / total_weight
+    sigmas = torch.cat((torch.tensor([0.0]), torch.cumsum(segment_length, dim=0)))
+    return sigmas

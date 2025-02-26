@@ -60,7 +60,7 @@ diffusion:
       patch_size: 2
       in_channels: 3
       hidden_size: 768
-      depth: 40
+      depth: 20
       num_heads: 12
       mlp_ratio: 4.0
       class_dropout_prob: 0.0
@@ -81,6 +81,7 @@ diffusion:
       fourier_basis: false
       edm_sigmas: false
       perlayer_embedder: false
+      number_of_shared_layers: 2
 data:
   target: fit.data.in1k_latent_dataset.INLatentLoader
   params:

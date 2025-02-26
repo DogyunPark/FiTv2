@@ -11,6 +11,7 @@ from fit.model.utils import get_parameter_dtype
 from fit.utils.eval_utils import init_from_ckpt
 #from fit.model.sincos import get_2d_sincos_pos_embed_from_grid
 from fit.model.rope import VisionRotaryEmbedding
+from fit.utils.utils import linear_increase_division
 
 #################################################################################
 #                                 Core FiT Model                                #
@@ -64,7 +65,8 @@ class FiTLwD(nn.Module):
         overlap: bool = False,
         fourier_basis: bool = False,
         max_cached_len: int = 256,
-        number_of_shared_layers: int = 2,
+        perlayer_embedder: bool = False,
+        number_of_shared_layers: int = 1,
         **kwargs,
     ):
         super().__init__()
@@ -85,11 +87,12 @@ class FiTLwD(nn.Module):
         self.adaln_type = adaln_type
         self.online_rope = online_rope
         self.time_shifting = time_shifting
-        self.sigmas = torch.linspace(0, 1, number_of_perflow+1)
+        self.sigmas = linear_increase_division(number_of_perflow)
         self.sigmas_overlap = self.sigmas + 1/(number_of_perflow * 5)
         self.overlap = overlap
         self.number_of_perflow = number_of_perflow
         self.number_of_layers_for_perflow = depth // number_of_perflow
+        self.perlayer_embedder = perlayer_embedder
         self.x_embedder = PatchEmbedder(in_channels * patch_size**2, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
@@ -100,12 +103,12 @@ class FiTLwD(nn.Module):
             adaln_bias=adaln_bias, adaln_type=adaln_type, adaln_lora_dim=adaln_lora_dim
         ) for _ in range(number_of_shared_layers)])
 
-        self.end_shared_blocks = nn.ModuleList([FiTBlock(
-            hidden_size, num_heads, mlp_ratio=mlp_ratio, swiglu=use_swiglu, swiglu_large=use_swiglu_large,
-            rel_pos_embed=rel_pos_embed, add_rel_pe_to_v=add_rel_pe_to_v, norm_layer=norm_type, 
-            q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight, qkv_bias=qkv_bias, ffn_bias=ffn_bias, 
-            adaln_bias=adaln_bias, adaln_type=adaln_type, adaln_lora_dim=adaln_lora_dim
-        ) for _ in range(number_of_shared_layers)])
+        # self.end_shared_blocks = nn.ModuleList([FiTBlock(
+        #     hidden_size, num_heads, mlp_ratio=mlp_ratio, swiglu=use_swiglu, swiglu_large=use_swiglu_large,
+        #     rel_pos_embed=rel_pos_embed, add_rel_pe_to_v=add_rel_pe_to_v, norm_layer=norm_type, 
+        #     q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight, qkv_bias=qkv_bias, ffn_bias=ffn_bias, 
+        #     adaln_bias=adaln_bias, adaln_type=adaln_type, adaln_lora_dim=adaln_lora_dim
+        # ) for _ in range(number_of_shared_layers)])
 
         if fourier_basis:
             self.fourier_basis = TimestepEmbedder(patch_size*patch_size*self.out_channels*2)
@@ -134,7 +137,10 @@ class FiTLwD(nn.Module):
         ) for _ in range(depth)])
 
         final_layer_out_channels = self.out_channels*2 if fourier_basis else self.out_channels
-        self.final_layer = FinalLayer(hidden_size, patch_size, final_layer_out_channels, norm_layer=norm_type, adaln_bias=adaln_bias, adaln_type=adaln_type)
+        if self.perlayer_embedder:
+            self.final_layer = nn.ModuleList([FinalLayer(hidden_size, patch_size, final_layer_out_channels, norm_layer=norm_type, adaln_bias=adaln_bias, adaln_type=adaln_type) for _ in range(self.number_of_perflow)])
+        else:
+            self.final_layer = FinalLayer(hidden_size, patch_size, final_layer_out_channels, norm_layer=norm_type, adaln_bias=adaln_bias, adaln_type=adaln_type)
         self.initialize_weights(pretrain_ckpt=pretrain_ckpt, ignore=ignore_keys)
         if finetune != None:
             self.finetune(type=finetune, unfreeze=ignore_keys)
@@ -176,15 +182,25 @@ class FiTLwD(nn.Module):
         if self.adaln_type == 'lora':
             nn.init.constant_(self.global_adaLN_modulation[-1].weight, 0)
             nn.init.constant_(self.global_adaLN_modulation[-1].bias, 0)
-        # Zero-out output layers:
-        if self.adaln_type == 'swiglu':
-            nn.init.constant_(self.final_layer.adaLN_modulation.fc2.weight, 0)
-            nn.init.constant_(self.final_layer.adaLN_modulation.fc2.bias, 0)
-        else:   # adaln_type in ['normal', 'lora']
-            nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
-        nn.init.constant_(self.final_layer.linear.weight, 0)
-        nn.init.constant_(self.final_layer.linear.bias, 0)
+        if self.perlayer_embedder:
+            for i, final_layer in enumerate(self.final_layer):
+                if self.adaln_type == 'swiglu':
+                    nn.init.constant_(final_layer.adaLN_modulation.fc2.weight, 0)
+                    nn.init.constant_(final_layer.adaLN_modulation.fc2.bias, 0)
+                else:   # adaln_type in ['normal', 'lora']
+                    nn.init.constant_(final_layer.adaLN_modulation[-1].weight, 0)
+                    nn.init.constant_(final_layer.adaLN_modulation[-1].bias, 0)
+                nn.init.constant_(final_layer.linear.weight, 0)
+                nn.init.constant_(final_layer.linear.bias, 0)
+        else:
+            if self.adaln_type == 'swiglu':
+                nn.init.constant_(self.final_layer.adaLN_modulation.fc2.weight, 0)
+                nn.init.constant_(self.final_layer.adaLN_modulation.fc2.bias, 0)
+            else:   # adaln_type in ['normal', 'lora']
+                nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
+                nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
+            nn.init.constant_(self.final_layer.linear.weight, 0)
+            nn.init.constant_(self.final_layer.linear.bias, 0)
         
         keys = list(self.state_dict().keys())
         ignore_keys = []
@@ -239,103 +255,68 @@ class FiTLwD(nn.Module):
             freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
             freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
         
-        if not self.use_checkpoint:
-            for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
-                sigma_next = self.sigmas[i+1] 
-                sigma_current = self.sigmas[i]
-                sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
+        
+        for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
+            sigma_next = self.sigmas[i+1] 
+            sigma_current = self.sigmas[i]
+            sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
 
-                for step in range(number_of_step_perflow):
-                    #if i_drop == 0:
-                    t = sigma_list[step].expand(x.shape[0]).to(x.device)
-                    t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
-                    t = t.float().to(x.dtype)
-                    t = self.t_embedder(t)
-                    c = t + y
+            for step in range(number_of_step_perflow):
+                #if i_drop == 0:
+                t = sigma_list[step].expand(x.shape[0]).to(x.device)
+                t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
+                t = t.float().to(x.dtype)
+                t = self.t_embedder(t)
+                c = t + y
 
-                    if self.fourier_basis is not None:
-                        t_next = self.sigmas[i+1].expand(x.shape[0]).to(x.device)
-                        t_next = torch.clamp(self.time_shifting * t_next / (1  + (self.time_shifting - 1) * t_next), max=1.0)        
-                        t_next = t_next.float().to(x.dtype)
-                        basis = self.fourier_basis(t_next)
-                        cos_basis, sin_basis = basis.chunk(2, dim=-1)
-                        cos_basis = cos_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
-                        sin_basis = sin_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
-                    
-                    if self.global_adaLN_modulation != None:
-                        global_adaln = self.global_adaLN_modulation(c)
-                    else: 
-                        global_adaln = 0.0
+                if self.fourier_basis is not None:
+                    t_next = self.sigmas[i+1].expand(x.shape[0]).to(x.device)
+                    t_next = torch.clamp(self.time_shifting * t_next / (1  + (self.time_shifting - 1) * t_next), max=1.0)        
+                    t_next = t_next.float().to(x.dtype)
+                    basis = self.fourier_basis(t_next)
+                    cos_basis, sin_basis = basis.chunk(2, dim=-1)
+                    cos_basis = cos_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
+                    sin_basis = sin_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
+                
+                if self.global_adaLN_modulation != None:
+                    global_adaln = self.global_adaLN_modulation(c)
+                else: 
+                    global_adaln = 0.0
 
-                    residual = x.clone()
-                    if not self.use_sit:
-                        x = rearrange(x, 'B C N -> B N C')          # (B, C, N) -> (B, N, C), where C = p**2 * C_in
-                    x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
-                    
+                residual = x.clone()
+                if not self.use_sit:
+                    x = rearrange(x, 'B C N -> B N C')          # (B, C, N) -> (B, N, C), where C = p**2 * C_in
+                x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
+                
+                if self.use_checkpoint:
+                    for block in self.start_shared_blocks:
+                        x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c, mask, freqs_cos, freqs_sin, global_adaln)
+
+                    for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
+                        x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c, mask, freqs_cos, freqs_sin, global_adaln)
+                    # for block in self.end_shared_blocks:
+                    #     x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c, mask, freqs_cos, freqs_sin, global_adaln)
+                else:
                     for block in self.start_shared_blocks:
                         x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
-
                     for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
                         x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
-                    
-                    for block in self.end_shared_blocks:
-                        x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
+                    # for block in self.end_shared_blocks:
+                    #     x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
 
+                if self.perlayer_embedder:
+                    x = self.final_layer[i](x, c)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
+                else:
                     x = self.final_layer(x, c)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
 
-                    if self.fourier_basis is not None:
-                        coeff_cos, coeff_sin = x.chunk(2, dim=-1)
-                        x = coeff_cos * cos_basis + coeff_sin * sin_basis
+                if self.fourier_basis is not None:
+                    coeff_cos, coeff_sin = x.chunk(2, dim=-1)
+                    x = coeff_cos * cos_basis + coeff_sin * sin_basis
 
-                    x = x * mask[..., None]                         # mask the padding tokens
-                    if not self.use_sit:
-                        x = rearrange(x, 'B N C -> B C N')          # (B, N, C) -> (B, C, N), where C = p**2 * C_out
-                    x = (sigma_list[step+1] - sigma_list[step]) * x + residual
-        else:
-            for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
-                sigma_next = self.sigmas[i+1] 
-                sigma_current = self.sigmas[i]
-                sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
-
-                for step in range(number_of_step_perflow):
-                    t = sigma_list[step].expand(x.shape[0]).to(x.device)
-                    t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
-                    t = t.float().to(x.dtype)
-                    t = self.t_embedder(t)
-                    c = t + y
-
-                    if self.fourier_basis is not None:
-                        t_next = self.sigmas[i+1].expand(x.shape[0]).to(x.device)
-                        t_next = torch.clamp(self.time_shifting * t_next / (1  + (self.time_shifting - 1) * t_next), max=1.0)        
-                        t_next = t_next.float().to(x.dtype)
-                        basis = self.fourier_basis(t_next)
-                        cos_basis, sin_basis = basis.chunk(2, dim=-1)
-                        cos_basis = cos_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
-                        sin_basis = sin_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
-
-                    if self.global_adaLN_modulation != None:
-                        global_adaln = self.global_adaLN_modulation(c)
-                    else: 
-                        global_adaln = 0.0
-                    
-                    residual = x.clone()
-                    if not self.use_sit:
-                        x = rearrange(x, 'B C N -> B N C')          # (B, C, N) -> (B, N, C), where C = p**2 * C_in
-                    x = self.x_embedder(x)   
-
-                    for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
-                        x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c, mask, freqs_cos, freqs_sin, global_adaln)  
-                    
-                    x = self.final_layer(x, c)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
-                    
-                    if self.fourier_basis is not None:
-                        coeff_cos, coeff_sin = x.chunk(2, dim=-1)
-                        x = coeff_cos * cos_basis + coeff_sin * sin_basis
-
-                    x = x * mask[..., None]                         # mask the padding tokens
-                    if not self.use_sit:
-                        x = rearrange(x, 'B N C -> B C N')          # (B, N, C) -> (B, C, N), where C = p**2 * C_out
-                    x = (sigma_list[step+1] - sigma_list[step]) * x + residual               
+                x = x * mask[..., None]                         # mask the padding tokens
+                if not self.use_sit:
+                    x = rearrange(x, 'B N C -> B C N')          # (B, N, C) -> (B, C, N), where C = p**2 * C_out
+                x = (sigma_list[step+1] - sigma_list[step]) * x + residual            
         return x
 
     def forward_run_layer(self, x, t, cfg, y, grid, mask, size=None, target_layer_start=None, target_layer_end=None, t_next=None):
@@ -343,7 +324,7 @@ class FiTLwD(nn.Module):
         assert target_layer_end is not None, "target_layer_end must be provided"
         assert len(self.blocks) >= target_layer_end, "target_layer_end must be within the range of the number of blocks"
 
-        t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
+        #t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
         t = t.float().to(x.dtype)
         cfg = cfg.float().to(x.dtype)
         if not self.use_sit:
@@ -352,13 +333,6 @@ class FiTLwD(nn.Module):
         t = self.t_embedder(t)        
         y = self.y_embedder(y, self.training)           # (B, D)
         c = t + y
-
-        if self.fourier_basis is not None:
-            assert t_next is not None, "t_next must be provided when fourier_basis is True"
-            basis = self.fourier_basis(t_next)
-            cos_basis, sin_basis = basis.chunk(2, dim=-1)
-            cos_basis = cos_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
-            sin_basis = sin_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
         
         # get RoPE frequences in advance, then calculate attention.
         if self.online_rope:    
@@ -371,21 +345,27 @@ class FiTLwD(nn.Module):
             global_adaln = self.global_adaLN_modulation(c)
         else: 
             global_adaln = 0.0
+        
+        if self.use_checkpoint:
+            for block in self.start_shared_blocks:
+                x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c, mask, freqs_cos, freqs_sin, global_adaln)
             
-        for block in self.start_shared_blocks:
-            x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
-
-        if not self.use_checkpoint:
-            for i in range(target_layer_start, target_layer_end):
-                x = self.blocks[i](x, c, mask, freqs_cos, freqs_sin, global_adaln)
-        else:
             for i in range(target_layer_start, target_layer_end):
                 x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(self.blocks[i]), x, c, mask, freqs_cos, freqs_sin, global_adaln)
+        else:
+            for block in self.start_shared_blocks:
+                x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
+            
+            for i in range(target_layer_start, target_layer_end):
+                x = self.blocks[i](x, c, mask, freqs_cos, freqs_sin, global_adaln)
         
-        for block in self.end_shared_blocks:
-            x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
+        # for block in self.end_shared_blocks:
+        #     x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
 
-        x = self.final_layer(x, c)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
+        if self.perlayer_embedder:
+            x = self.final_layer[target_layer_start // self.number_of_layers_for_perflow](x, c)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
+        else:
+            x = self.final_layer(x, c)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
 
         if self.fourier_basis is not None:
             coeff_cos, coeff_sin = x.chunk(2, dim=-1)
@@ -512,124 +492,72 @@ class FiTLwD(nn.Module):
             freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
             freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
         
-        if not self.use_checkpoint:
-            for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
-                sigma_next = self.sigmas[i+1] 
-                sigma_current = self.sigmas[i]
-                sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
+        
+        for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
+            sigma_next = self.sigmas[i+1] 
+            sigma_current = self.sigmas[i]
+            sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
 
-                for step in range(number_of_step_perflow):
-                    t = sigma_list[step].expand(x.shape[0]*2).to(x.device)
-                    t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
-                    t = t.float().to(x.dtype)
-                    t = self.t_embedder(t)
-                    c = t + y
+            for step in range(number_of_step_perflow):
+                t = sigma_list[step].expand(x.shape[0]*2).to(x.device)
+                t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
+                t = t.float().to(x.dtype)
+                t = self.t_embedder(t)
+                c = t + y
 
-                    if self.fourier_basis is not None:
-                        t_next = self.sigmas[i+1].expand(x.shape[0]).to(x.device)
-                        t_next = torch.clamp(self.time_shifting * t_next / (1  + (self.time_shifting - 1) * t_next), max=1.0)        
-                        t_next = t_next.float().to(x.dtype)
-                        basis = self.fourier_basis(t_next)
-                        cos_basis, sin_basis = basis.chunk(2, dim=-1)
-                        cos_basis = cos_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
-                        sin_basis = sin_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
+                if self.fourier_basis is not None:
+                    t_next = self.sigmas[i+1].expand(x.shape[0]).to(x.device)
+                    t_next = torch.clamp(self.time_shifting * t_next / (1  + (self.time_shifting - 1) * t_next), max=1.0)        
+                    t_next = t_next.float().to(x.dtype)
+                    basis = self.fourier_basis(t_next)
+                    cos_basis, sin_basis = basis.chunk(2, dim=-1)
+                    cos_basis = cos_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
+                    sin_basis = sin_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
+                
+                if self.global_adaLN_modulation != None:
+                    global_adaln = self.global_adaLN_modulation(c)
+                else: 
+                    global_adaln = 0.0
+
+                residual = x.clone()
+                x = torch.cat([x, x], dim=0)
+
+                if not self.use_sit:
+                    x = rearrange(x, 'B C N -> B N C')          # (B, C, N) -> (B, N, C), where C = p**2 * C_in
+                x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
+                
+                if self.use_checkpoint:
+                    for block in self.start_shared_blocks:
+                        x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c, mask, freqs_cos, freqs_sin, global_adaln)
                     
-                    if self.global_adaLN_modulation != None:
-                        global_adaln = self.global_adaLN_modulation(c)
-                    else: 
-                        global_adaln = 0.0
-
-                    residual = x.clone()
-                    x = torch.cat([x, x], dim=0)
-
-                    if not self.use_sit:
-                        x = rearrange(x, 'B C N -> B N C')          # (B, C, N) -> (B, N, C), where C = p**2 * C_in
-                    x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
-                    
+                    for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
+                        x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c, mask, freqs_cos, freqs_sin, global_adaln)
+                else:
                     for block in self.start_shared_blocks:
                         x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
 
                     for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
                         x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
-                    
-                    for block in self.end_shared_blocks:
-                        x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
+                
+                # for block in self.end_shared_blocks:
+                #     x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
 
+                if self.perlayer_embedder:
+                    x = self.final_layer[i](x, c)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
+                else:
                     x = self.final_layer(x, c)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
 
-                    if self.fourier_basis is not None:
-                        coeff_cos, coeff_sin = x.chunk(2, dim=-1)
-                        x = coeff_cos * cos_basis + coeff_sin * sin_basis
+                if self.fourier_basis is not None:
+                    coeff_cos, coeff_sin = x.chunk(2, dim=-1)
+                    x = coeff_cos * cos_basis + coeff_sin * sin_basis
 
-                    x = x * mask[..., None]                         # mask the padding tokens
-                    if not self.use_sit:
-                        x = rearrange(x, 'B N C -> B C N')          # (B, N, C) -> (B, C, N), where C = p**2 * C_out
-                    
-                    x_cond, x_uncond = x.chunk(2, dim=0)
-                    x = x_uncond + cfg * (x_cond - x_uncond)
-                    x = (sigma_list[step+1] - sigma_list[step]) * x + residual
-        else:
-            for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
-                sigma_next = self.sigmas[i+1] 
-                sigma_current = self.sigmas[i]
-                sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
-
-                for step in range(number_of_step_perflow):
-                    #if i_drop == 0:
-                    t = sigma_list[step].expand(x.shape[0]*2).to(x.device)
-                    t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
-                    t = t.float().to(x.dtype)
-                    t = self.t_embedder(t)
-                    c = t + y
-
-                    if self.fourier_basis is not None:
-                        t_next = self.sigmas[i+1].expand(x.shape[0]).to(x.device)
-                        t_next = torch.clamp(self.time_shifting * t_next / (1  + (self.time_shifting - 1) * t_next), max=1.0)        
-                        t_next = t_next.float().to(x.dtype)
-                        basis = self.fourier_basis(t_next)
-                        cos_basis, sin_basis = basis.chunk(2, dim=-1)
-                        cos_basis = cos_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
-                        sin_basis = sin_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
-                    
-                    if self.global_adaLN_modulation != None:
-                        global_adaln = self.global_adaLN_modulation(c)
-                    else: 
-                        global_adaln = 0.0
-
-                    residual = x.clone()
-                    x = torch.cat([x, x], dim=0)
-                    mask = torch.cat([mask, mask], dim=0)
-                    size = torch.cat([size, size], dim=0)
-                    grid = torch.cat([grid, grid], dim=0)
-                    y_null = torch.tensor([self.num_classes] * x.shape[0], device=x.device)
-                    y = torch.cat([y, y_null], dim=0)
-
-                    if not self.use_sit:
-                        x = rearrange(x, 'B C N -> B N C')          # (B, C, N) -> (B, N, C), where C = p**2 * C_in
-                    x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
-                    
-                    for block in self.start_shared_blocks:
-                        x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
-
-                    for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
-                        x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c, mask, freqs_cos, freqs_sin, global_adaln)  
-                    
-                    for block in self.end_shared_blocks:
-                        x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
-
-                    x = self.final_layer(x, c)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
-
-                    if self.fourier_basis is not None:
-                        coeff_cos, coeff_sin = x.chunk(2, dim=-1)
-                        x = coeff_cos * cos_basis + coeff_sin * sin_basis
-
-                    x = x * mask[..., None]                         # mask the padding tokens
-                    if not self.use_sit:
-                        x = rearrange(x, 'B N C -> B C N')          # (B, N, C) -> (B, C, N), where C = p**2 * C_out
-                    
-                    x_cond, x_uncond = x.chunk(2, dim=0)
-                    x = x_uncond + cfg * (x_cond - x_uncond)
-                    x = (sigma_list[step+1] - sigma_list[step]) * x + residual
+                x = x * mask[..., None]                         # mask the padding tokens
+                if not self.use_sit:
+                    x = rearrange(x, 'B N C -> B C N')          # (B, N, C) -> (B, C, N), where C = p**2 * C_out
+                
+                x_cond, x_uncond = x.chunk(2, dim=0)
+                x = x_uncond + cfg * (x_cond - x_uncond)
+                x = (sigma_list[step+1] - sigma_list[step]) * x + residual
         return x
         
     def ckpt_wrapper(self, module):

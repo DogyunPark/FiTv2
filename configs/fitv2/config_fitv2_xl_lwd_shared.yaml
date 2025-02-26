@@ -69,7 +69,7 @@ diffusion:
       use_sit: true
       use_swiglu: true
       use_swiglu_large: false
-      use_checkpoint: false
+      use_checkpoint: true
       q_norm: layernorm
       k_norm: layernorm
       qk_norm_weight: false
@@ -77,9 +77,11 @@ diffusion:
       abs_pos_embed: null
       adaln_type: normal
       adaln_lora_dim: 288
-      number_of_perflow: 10
+      number_of_perflow: 20
       overlap: false
       fourier_basis: false
+      perlayer_embedder: true
+      number_of_shared_layers: 2
 data:
   target: fit.data.in1k_latent_dataset.INLatentLoader
   params:
@@ -89,7 +91,7 @@ data:
       target_len: 256
       random: 'crop'
       loader:
-        batch_size: 64
+        batch_size: 256
         num_workers: 8
         shuffle: true
 
