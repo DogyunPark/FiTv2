@@ -11,7 +11,7 @@ from fit.model.utils import get_parameter_dtype
 from fit.utils.eval_utils import init_from_ckpt
 #from fit.model.sincos import get_2d_sincos_pos_embed_from_grid
 from fit.model.rope import VisionRotaryEmbedding
-from fit.utils.utils import linear_increase_division
+#from fit.utils.utils import linear_increase_division
 #################################################################################
 #                                 Core FiT Model                                #
 #################################################################################
@@ -86,12 +86,7 @@ class FiTLwD(nn.Module):
         self.adaln_type = adaln_type
         self.online_rope = online_rope
         self.time_shifting = time_shifting
-        # weights = torch.arange(1, number_of_perflow+1)
-        # total_weight = weights.sum()
-        # segment_length = weights / total_weight
-        # self.sigmas = torch.cat((torch.tensor([0.0]), torch.cumsum(segment_length, dim=0)))
         self.sigmas = torch.linspace(0, 1, number_of_perflow+1)
-        #self.sigmas = linear_increase_division(number_of_perflow)
         self.sigmas_overlap = self.sigmas - 1/(number_of_perflow*2)
         self.overlap = overlap
         self.perlayer_embedder = perlayer_embedder
@@ -112,15 +107,15 @@ class FiTLwD(nn.Module):
         else:
             self.x_embedder = PatchEmbedder(in_channels * patch_size**2, hidden_size, bias=True)
         
-        if perlayer_embedder:
-            self.t_embedder = nn.ModuleList([TimestepEmbedder(hidden_size) for _ in range(number_of_perflow)])
-        else:
-            self.t_embedder = TimestepEmbedder(hidden_size)
+        # if perlayer_embedder:
+        #     self.t_embedder = nn.ModuleList([TimestepEmbedder(hidden_size) for _ in range(number_of_perflow)])
+        # else:
+        self.t_embedder = TimestepEmbedder(hidden_size)
         
-        if perlayer_embedder:
-            self.y_embedder = nn.ModuleList([LabelEmbedder(num_classes, hidden_size, class_dropout_prob) for _ in range(number_of_perflow)])
-        else:
-            self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
+        # if perlayer_embedder:
+        #     self.y_embedder = nn.ModuleList([LabelEmbedder(num_classes, hidden_size, class_dropout_prob) for _ in range(number_of_perflow)])
+        # else:
+        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
 
         if fourier_basis:
             self.fourier_basis = TimestepEmbedder(patch_size*patch_size*self.out_channels*2)
@@ -179,20 +174,20 @@ class FiTLwD(nn.Module):
             nn.init.constant_(self.x_embedder.proj.bias, 0)
 
         # Initialize label embedding table:
-        if self.perlayer_embedder:
-            for i, embedder in enumerate(self.y_embedder):
-                nn.init.normal_(embedder.embedding_table.weight, std=0.02)
-        else:
-            nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
+        # if self.perlayer_embedder:
+        #     for i, embedder in enumerate(self.y_embedder):
+        #         nn.init.normal_(embedder.embedding_table.weight, std=0.02)
+        # else:
+        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
 
         # Initialize timestep embedding MLP:
-        if self.perlayer_embedder:
-            for i, embedder in enumerate(self.t_embedder):
-                nn.init.normal_(embedder.mlp[0].weight, std=0.02)
-                nn.init.normal_(embedder.mlp[2].weight, std=0.02)
-        else:
-            nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
-            nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+        # if self.perlayer_embedder:
+        #     for i, embedder in enumerate(self.t_embedder):
+        #         nn.init.normal_(embedder.mlp[0].weight, std=0.02)
+        #         nn.init.normal_(embedder.mlp[2].weight, std=0.02)
+        # else:
+        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
         if self.fourier_basis is not None:
             nn.init.normal_(self.fourier_basis.mlp[0].weight, std=0.02)
@@ -278,16 +273,15 @@ class FiTLwD(nn.Module):
         else:
             freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
             freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
-        
-        #for i, block in enumerate(self.blocks):
+
         for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
             # i_mod = i // number_of_layers_for_perflow
             # i_drop = i % number_of_layers_for_perflow
             # i_finish = (i+1) % number_of_layers_for_perflow
-            if self.perlayer_embedder:
-                y_embed = self.y_embedder[i](y, self.training)           # (B, D)
-            else:
-                y_embed = self.y_embedder(y, self.training)           # (B, D)
+            # if self.perlayer_embedder:
+            #     y_embed = self.y_embedder[i](y, self.training)           # (B, D)
+            # else:
+            y_embed = self.y_embedder(y, self.training)           # (B, D)
 
             sigma_next = self.sigmas[i+1] 
             if self.overlap:
@@ -304,10 +298,10 @@ class FiTLwD(nn.Module):
                 t = sigma_list[step].expand(x.shape[0]).to(x.device)
                 t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
                 t = t.float().to(x.dtype)
-                if self.perlayer_embedder:
-                    t = self.t_embedder[i](t)
-                else:
-                    t = self.t_embedder(t)
+                # if self.perlayer_embedder:
+                #     t = self.t_embedder[i](t)
+                # else:
+                t = self.t_embedder(t)
                 c = t + y_embed
 
                 if self.fourier_basis is not None:
@@ -361,7 +355,7 @@ class FiTLwD(nn.Module):
                 x = (sigma_list[step+1] - sigma_list[step]) * x + residual
             
             if self.overlap and i != len(self.blocks) // self.number_of_layers_for_perflow - 1:
-                x = (self.sigmas_overlap[i+1] / self.sigmas[i+1]) * x + (((1-self.sigmas_overlap[i+1])**2 - ((1-self.sigmas[i+1])**2 * (self.sigmas_overlap[i+1])**2 / (self.sigmas[i+1])**2))).sqrt() * noise
+                x = (self.sigmas_overlap[i+1] / self.sigmas[i+1]) * x + (((1-self.sigmas_overlap[i+1])**2 - ((1-self.sigmas[i+1])**2 * (self.sigmas_overlap[i+1])**2 / (self.sigmas[i+1])**2))).sqrt() * torch.randn_like(x)
         return x
     
     def forward_run_layer(self, x, t, cfg, y, grid, mask, size=None, target_layer_start=None, target_layer_end=None, t_next=None):
@@ -379,15 +373,15 @@ class FiTLwD(nn.Module):
         else:
             x = self.x_embedder(x)    
         
-        if self.perlayer_embedder:
-            t = self.t_embedder[target_layer_start // self.number_of_layers_for_perflow](t)        
-        else:
-            t = self.t_embedder(t)        
+        # if self.perlayer_embedder:
+        #     t = self.t_embedder[target_layer_start // self.number_of_layers_for_perflow](t)        
+        # else:
+        t = self.t_embedder(t)        
         #cfg = self.c_embedder(cfg)
-        if self.perlayer_embedder:
-            y = self.y_embedder[target_layer_start // self.number_of_layers_for_perflow](y, self.training)           # (B, D)
-        else:
-            y = self.y_embedder(y, self.training)           # (B, D)
+        # if self.perlayer_embedder:
+        #     y = self.y_embedder[target_layer_start // self.number_of_layers_for_perflow](y, self.training)           # (B, D)
+        # else:
+        y = self.y_embedder(y, self.training)           # (B, D)
         c = t + y
 
         if self.fourier_basis is not None:
@@ -443,6 +437,7 @@ class FiTLwD(nn.Module):
         sigmas_ = self.sigmas[target_start_idx:target_end_idx+1]
         
         intermediate_layers = []
+        y = self.y_embedder(y, self.training)           # (B, D)
         
         # get RoPE frequences in advance, then calculate attention.
         if self.online_rope:    
@@ -453,13 +448,14 @@ class FiTLwD(nn.Module):
             freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
         
         for i in range(len(sigmas_)-1):
-            if self.perlayer_embedder:
-                y_embed = self.y_embedder[target_start_idx+i](y, self.training)           # (B, D)
+            sigma_next = sigmas_[i+1]
+            if self.overlap:
+                if i == 0:
+                    sigma_current = self.sigmas[i]
+                else:
+                    sigma_current = self.sigmas_overlap[i]
             else:
-                y_embed = self.y_embedder(y, self.training)           # (B, D)
-
-            sigma_next = sigmas_[i+1] 
-            sigma_current = sigmas_[i]
+                sigma_current = self.sigmas[i]
             sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
 
             for step in range(number_of_step_perflow):
@@ -468,11 +464,8 @@ class FiTLwD(nn.Module):
                     t_input = sigma_list[step].expand(x.shape[0]).to(x.device)
                 t = torch.clamp(self.time_shifting * t_input / (1  + (self.time_shifting - 1) * t_input), max=1.0)        
                 t = t.float().to(x.dtype)
-                if self.perlayer_embedder:
-                    t = self.t_embedder[target_start_idx+i](t)
-                else:
-                    t = self.t_embedder(t)
-                c = t + y_embed
+                t = self.t_embedder(t)
+                c = t + y
                 
                 if self.global_adaLN_modulation != None:
                     global_adaln = self.global_adaLN_modulation(c)
@@ -494,7 +487,6 @@ class FiTLwD(nn.Module):
                     for block in self.blocks[target_start_idx + i*self.number_of_layers_for_perflow: target_start_idx + (i+1)*self.number_of_layers_for_perflow]:
                         x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
 
-                #if i_finish == 0:
                 if self.perlayer_embedder:
                     x = self.final_layer[target_start_idx+i](x, c)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
                 else:
@@ -509,6 +501,9 @@ class FiTLwD(nn.Module):
 
                 x = (sigma_list[step+1].expand(x.shape[0]).to(x.device)[:, None, None] - t_input[:, None, None]) * x + residual
 
+            if self.overlap and i != len(sigmas_) - 1:
+                x = (self.sigmas_overlap[i+1] / self.sigmas[i+1]) * x + (((1-self.sigmas_overlap[i+1])**2 - ((1-self.sigmas[i+1])**2 * (self.sigmas_overlap[i+1])**2 / (self.sigmas[i+1])**2))).sqrt() * torch.randn_like(x)
+                
         if return_all_layers:
             return x, intermediate_layers
         else:   
@@ -530,6 +525,7 @@ class FiTLwD(nn.Module):
         assert cfg > 1, "cfg must be greater than 1"
         y_null = torch.tensor([self.num_classes] * x.shape[0], device=x.device)
         y = torch.cat([y, y_null], dim=0)
+        y = self.y_embedder(y, self.training)           # (B, D)
         size = torch.cat([size, size], dim=0)
         grid = torch.cat([grid, grid], dim=0)
         mask = torch.cat([mask, mask], dim=0)
@@ -552,19 +548,13 @@ class FiTLwD(nn.Module):
             else:
                 sigma_current = self.sigmas[i]
             sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
-            if self.perlayer_embedder:
-                y_embed = self.y_embedder[i](y, self.training)           # (B, D)
-            else:
-                y_embed = self.y_embedder(y, self.training)           # (B, D)
+
             for step in range(number_of_step_perflow):
                 t = sigma_list[step].expand(x.shape[0]*2).to(x.device)
                 t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
                 t = t.float().to(x.dtype)
-                if self.perlayer_embedder:
-                    t = self.t_embedder[i](t)
-                else:
-                    t = self.t_embedder(t)
-                c = t + y_embed
+                t = self.t_embedder(t)
+                c = t + y
 
                 if self.fourier_basis is not None:
                     t_next = self.sigmas[i+1].expand(x.shape[0]).to(x.device)
@@ -621,7 +611,7 @@ class FiTLwD(nn.Module):
                 x = (sigma_list[step+1] - sigma_list[step]) * x + residual
 
             if self.overlap and i != len(self.blocks) // self.number_of_layers_for_perflow - 1:
-                x = (self.sigmas_overlap[i+1] / self.sigmas[i+1]) * x + (((1-self.sigmas_overlap[i+1])**2 - ((1-self.sigmas[i+1])**2 * (self.sigmas_overlap[i+1])**2 / (self.sigmas[i+1])**2))).sqrt() * noise
+                x = (self.sigmas_overlap[i+1] / self.sigmas[i+1]) * x + (((1-self.sigmas_overlap[i+1])**2 - ((1-self.sigmas[i+1])**2 * (self.sigmas_overlap[i+1])**2 / (self.sigmas[i+1])**2))).sqrt() * torch.randn_like(x)
         return x
         
     def ckpt_wrapper(self, module):

@@ -586,6 +586,7 @@ def main():
     H, W = n_patch_h * 2, n_patch_w * 2
     print('Generating images with resolution: ', H*8, 'x', W*8)
     y_test = torch.randint(0, 1000, (test_batch_size,), device=device)
+    print('Class: ', y_test)
     noise_test = torch.randn((test_batch_size, n_patch_h*n_patch_w, (2**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
 
     for step, batch in enumerate(train_dataloader, start=global_steps):
@@ -868,7 +869,10 @@ def main():
                         model_kwargs_fid = dict(y=y, grid=grid_test.long(), mask=mask_test, size=size_test)
 
                         with accelerator.autocast():
-                            samples = ema_model.module.forward_cfg(latents, t_test, 2, **model_kwargs_fid)
+                            if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
+                                samples = ema_model.module.forward_cfg(latents, t_test, 2, **model_kwargs_fid)
+                            else:
+                                samples = ema_model.forward_cfg(latents, t_test, 2, **model_kwargs_fid)
 
                         samples = samples[:, : n_patch_h*n_patch_w]
                         if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):

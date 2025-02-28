@@ -426,7 +426,7 @@ def main():
     logger.info(f"Fixed Generator parameters: {fixed_params}")
 
     if diffusion_cfg.gan_guidance_config.sat:
-        from fit.losses.perceptual import LPIPSWithDiscriminator2D
+        from fit.losses.perceptual import LPIPSWithDiscriminator2D, calculate_adaptive_weight
         gan_guidance = LPIPSWithDiscriminator2D(
             disc_in_channels=diffusion_cfg.gan_guidance_config.params.disc_in_channels,
             disc_num_layers=diffusion_cfg.gan_guidance_config.params.disc_num_layers,
@@ -516,9 +516,6 @@ def main():
     )
 
     # Setup optimizer and lr_scheduler
-    if accelerator.is_main_process:
-        for name, param in model.named_parameters():
-            print(name, param.requires_grad)
     if getattr(diffusion_cfg, 'pretrain_config', None) != None: # transfer to larger reolution     
         params = filter(lambda p: p.requires_grad, model.parameters())
     else:
@@ -535,6 +532,15 @@ def main():
         num_warmup_steps=accelerate_cfg.lr_warmup_steps,
         num_training_steps=accelerate_cfg.max_train_steps,
     )
+
+    # Setup discriminator optimizer and lr_scheduler
+    if diffusion_cfg.gan_guidance_config.sat:
+        if getattr(diffusion_cfg, 'pretrain_config', None) != None: # transfer to larger reolution     
+            d_params = filter(lambda p: p.requires_grad, gan_guidance.parameters())
+        else:
+            d_params = list(gan_guidance.parameters())
+        optimizer_d = torch.optim.AdamW(d_params, lr=1e-4, betas=(0.5, 0.9))
+        optimizer_d = accelerator.prepare(optimizer_d)
     
     # Prepare Accelerate
     optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
@@ -632,7 +638,8 @@ def main():
     size = torch.tensor((n_patch_h, n_patch_w)).repeat(data_cfg.params.train.loader.batch_size,1).to(device=device, dtype=torch.long)
     size = size[:, None, :]
 
-    #for step, batch in enumerate(train_dataloader, start=global_steps):
+    optimizer_idx = True
+    
     for step in range(global_steps, accelerate_cfg.max_train_steps):
         batch = next(train_dataloader)
         x, y = batch[0], batch[1]
@@ -653,15 +660,178 @@ def main():
 
         x0 = torch.randn_like(x)
 
-        for layer_idx in range(number_of_perflow):
-            #layer_idx = torch.randint(0, number_of_perflow, (1,)).item()
-            #layer_idx = bell_shaped_sample(0, number_of_perflow, 5, 1, 5)[0]
-            #layer_idx = discrete_lognormal_sample(0, number_of_perflow, 1, 1, 1)[0] - 1
-            model_kwargs = dict(y=y, grid=grid.long(), mask=mask, size=size, target_layer_start=layer_idx * number_of_layers_for_perflow, target_layer_end=layer_idx * number_of_layers_for_perflow + number_of_layers_for_perflow)
+        if optimizer_idx:
+            for layer_idx in range(number_of_perflow):
+                model_kwargs = dict(y=y, grid=grid.long(), mask=mask, size=size, target_layer_start=layer_idx * number_of_layers_for_perflow, target_layer_end=layer_idx * number_of_layers_for_perflow + number_of_layers_for_perflow)
 
 
-            sigma_next = sigmas[layer_idx + 1]
-            #sigma_next = sigmas[-1]
+                sigma_next = sigmas[layer_idx + 1]
+                #sigma_next = sigmas[-1]
+                if args.overlap:
+                    if layer_idx == 0:
+                        sigma_current = sigmas[layer_idx]
+                    else:
+                        sigma_current = sigmas[layer_idx] - 1/(number_of_perflow*2)
+                else:
+                    sigma_current = sigmas[layer_idx]
+
+                if args.random_perflow_step:
+                    perflow_solver_step = torch.randint(1, solver_step+1, (1,)).item()
+                else:
+                    perflow_solver_step = solver_step
+                
+                sigma_list = torch.linspace(sigma_current.item(), sigma_next.item(), perflow_solver_step+1)
+                
+                if args.edm_sigmas:
+                    xt = x + sigmas[layer_idx] * x0
+                    x_input = x + sigmas[layer_idx] * x0
+                else:
+                    ratio = sigma_current.clone()
+                    while len(ratio.shape) < x0.ndim:
+                        ratio = ratio.unsqueeze(-1)
+                    xt = x0 * (1-ratio) + x * ratio
+
+                if args.distillation:
+                    with torch.no_grad():
+                        if args.edm_sigmas:
+                            for i in range(perflow_solver_step):
+                                t_cur = sigma_list[i].to(device=device)
+                                t_next = sigma_list[i+1].to(device=device)
+                                S_churn = 0.0
+                                S_min = 0.0
+                                S_max = float('inf')
+                                S_noise = 1.0
+                                # Increase noise temporarily.
+                                gamma = min(S_churn / args.number_of_perflow, np.sqrt(2) - 1) if S_min <= t_cur <= S_max else 0
+                                t_hat = pretrained_model.round_sigma(t_cur + gamma * t_cur)
+                                xt = xt + (t_hat ** 2 - t_cur ** 2).sqrt() * S_noise * torch.randn_like(xt)
+
+                                # Euler step.
+                                denoised = pretrained_model(xt, t_hat, torch.nn.functional.one_hot(y.long(), num_classes=10))
+                                d_cur = (xt - denoised) / t_hat
+                                xt_next = xt + (t_next - t_hat) * d_cur
+
+                                # Apply 2nd order correction.
+                                if i < perflow_solver_step - 1:
+                                    denoised = pretrained_model(xt_next, t_next, torch.nn.functional.one_hot(y.long(), num_classes=10))
+                                    d_prime = (xt_next - denoised) / t_next
+                                    xt = xt + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
+                                else:
+                                    xt = xt_next                   
+                        else:
+                            y_null = torch.tensor([1000] * x.shape[0], device=device)
+                            y_cfg = torch.cat([y, y_null], dim=0)
+                            grid_cfg = torch.cat([grid, grid], dim=0)
+                            mask_cfg = torch.cat([mask, mask], dim=0)
+                            size_cfg = torch.cat([size, size], dim=0)
+                            model_kwargs_cfg = dict(y=y_cfg, grid=grid_cfg.long(), mask=mask_cfg, size=size_cfg)
+
+                            for i in range(perflow_solver_step):
+                                sigma_next_i = sigma_list[i+1]
+                                sigma_current_i = sigma_list[i]
+                                t_cfg = sigma_current_i.repeat(x.shape[0]*2).to(device=device)
+                                x_input = torch.cat([xt, xt], dim=0)
+                                model_output = pretrained_model(x_input, t_cfg, **model_kwargs_cfg)
+
+                                C_cfg = 3 * 2 * 2
+                                noise_pred_cond, noise_pred_uncond = model_output.chunk(2, dim=0)
+                                noise_pred = noise_pred_uncond + cfg_scale.to(device=device) * (noise_pred_cond - noise_pred_uncond)
+                                xt = xt + (sigma_next_i - sigma_current_i) * noise_pred
+                else:
+                    ratio_next = sigma_next.clone()
+                    while len(ratio_next.shape) < x0.ndim:
+                        ratio_next = ratio_next.unsqueeze(-1)
+                    xt = x0 * (1-ratio_next) + x * ratio_next
+
+                if args.reflow:
+                    if args.edm_sigmas:
+                        xt_input = x + sigmas[layer_idx] * x0
+                    else:
+                        xt_input = x0 * (1-ratio) + x * ratio
+                    per_flow_ratio = torch.randint(0, 1000, (x.shape[0],)) / 1000
+                    per_flow_ratio = per_flow_ratio.to(device=device)
+                    t_input = sigma_current + per_flow_ratio.clone() * (sigma_next - sigma_current)
+                    while len(per_flow_ratio.shape) < x0.ndim:
+                        per_flow_ratio = per_flow_ratio.unsqueeze(-1)
+                    x_input = xt_input * (1-per_flow_ratio) + xt * per_flow_ratio
+                    target = (xt - xt_input) / (sigma_next - sigma_current)
+                    weight = 1
+
+                    if args.double:
+                        if layer_idx != number_of_perflow - 1:
+                            ratio_next_2 = sigmas[layer_idx+2].clone()
+                            while len(ratio_next_2.shape) < x0.ndim:
+                                ratio_next_2 = ratio_next_2.unsqueeze(-1)
+                            xt_2 = x0 * (1-ratio_next_2) + x * ratio_next_2
+                            target_plus = (xt_2 - xt) / (sigmas[layer_idx+2] - sigma_next)
+
+                else:
+                    if args.edm_sigmas:
+                        target = (xt - x_input) / (sigma_next - sigma_current)
+                        weight = 1.
+                    else:
+                        target = (xt - x_input) / (sigma_next - sigma_current)
+                        x_input = x0 * (1-ratio) + x * ratio
+                        weight = 1.
+                    t_input = sigma_current.repeat(x.shape[0]).to(device=device)
+
+                if diffusion_cfg.distillation_network_config.params.fourier_basis:
+                    t_next = sigma_next.repeat(x.shape[0]).to(device=device)
+                else:
+                    t_next = None
+
+                with accelerator.accumulate(model):
+                    # save memory for x, grid, mask
+                    # forward model and compute loss
+                    with accelerator.autocast():
+                        _, _ = get_flexible_mask_and_ratio(model_kwargs, x_input)
+                        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                            pred_model = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                        else:
+                            pred_model = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                        
+                    losses = mean_flat(((pred_model - target)**2)) * weight
+                    loss += losses.mean()
+
+                    if args.consistency_loss:
+                        xt_plus = x0 * (1-ratio_next) + x * ratio_next
+                        xt_current = x0 * (1-ratio) + x * ratio
+                        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                            pred_model_xt = model.module.forward_run_layer_from_target_layer(xt_current, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx)
+                            
+                            if layer_idx == number_of_perflow - 1:
+                                pred_model_xt_plus = x
+                            else:
+                                with torch.no_grad():
+                                    pred_model_xt_plus = model.module.forward_run_layer_from_target_layer(xt_plus, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx+1).detach()
+                        else:
+                            pred_model_xt = model.forward_run_layer_from_target_layer(xt_current, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx)
+
+                            if layer_idx == number_of_perflow - 1:
+                                pred_model_xt_plus = x
+                            else:
+                                with torch.no_grad():
+                                    pred_model_xt_plus = model.forward_run_layer_from_target_layer(xt_plus, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx+1).detach()
+
+                        loss_consistency = mean_flat((((pred_model_xt_plus - pred_model_xt)) ** 2)) * weight
+                        loss += loss_consistency.mean()
+
+                    if args.double:
+                        if layer_idx != number_of_perflow - 1:
+                            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                                _, intermediate_layers = model.module.forward_run_layer_from_target_layer(x_input, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx, target_end_idx=layer_idx+1, return_all_layers=True)
+                            else:
+                                _, intermediate_layers = model.forward_run_layer_from_target_layer(x_input, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx, target_end_idx=layer_idx+1, return_all_layers=True)
+
+                            loss_double = mean_flat((((intermediate_layers[-1] - target_plus)) ** 2)) * weight
+                            loss += loss_double.mean()
+
+            # Backpropagate
+            loss = loss / (number_of_perflow)
+
+            # Calculate the loss for the discriminator
+            #gan_guidance.eval()
+            layer_idx = -1
             if args.overlap:
                 if layer_idx == 0:
                     sigma_current = sigmas[layer_idx]
@@ -669,238 +839,156 @@ def main():
                     sigma_current = sigmas[layer_idx] - 1/(number_of_perflow*2)
             else:
                 sigma_current = sigmas[layer_idx]
-
-            if args.random_perflow_step:
-                perflow_solver_step = torch.randint(1, solver_step+1, (1,)).item()
-            else:
-                perflow_solver_step = solver_step
-            
-            sigma_list = torch.linspace(sigma_current.item(), sigma_next.item(), perflow_solver_step+1)
             
             if args.edm_sigmas:
-                xt = x + sigmas[layer_idx] * x0
                 x_input = x + sigmas[layer_idx] * x0
             else:
                 ratio = sigma_current.clone()
                 while len(ratio.shape) < x0.ndim:
                     ratio = ratio.unsqueeze(-1)
-                xt = x0 * (1-ratio) + x * ratio
-
-            if args.distillation:
-                with torch.no_grad():
-                    if args.edm_sigmas:
-                        for i in range(perflow_solver_step):
-                            t_cur = sigma_list[i].to(device=device)
-                            t_next = sigma_list[i+1].to(device=device)
-                            S_churn = 0.0
-                            S_min = 0.0
-                            S_max = float('inf')
-                            S_noise = 1.0
-                            # Increase noise temporarily.
-                            gamma = min(S_churn / args.number_of_perflow, np.sqrt(2) - 1) if S_min <= t_cur <= S_max else 0
-                            t_hat = pretrained_model.round_sigma(t_cur + gamma * t_cur)
-                            xt = xt + (t_hat ** 2 - t_cur ** 2).sqrt() * S_noise * torch.randn_like(xt)
-
-                            # Euler step.
-                            denoised = pretrained_model(xt, t_hat, torch.nn.functional.one_hot(y.long(), num_classes=10))
-                            d_cur = (xt - denoised) / t_hat
-                            xt_next = xt + (t_next - t_hat) * d_cur
-
-                            # Apply 2nd order correction.
-                            if i < perflow_solver_step - 1:
-                                denoised = pretrained_model(xt_next, t_next, torch.nn.functional.one_hot(y.long(), num_classes=10))
-                                d_prime = (xt_next - denoised) / t_next
-                                xt = xt + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
-                            else:
-                                xt = xt_next
-                        # import pdb; pdb.set_trace()
-                        # sample = xt.clamp(-1, 1)
-                        # samples = torch.clamp(127.5 * sample + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
-                        # for j, img_tensor in enumerate(samples):
-                        #     img = Image.fromarray(img_tensor.cpu().numpy())
-                        #     img.save(os.path.join("./samples_fit", f"edm_sample_{j}.jpg"))
-                            
-                    else:
-                        y_null = torch.tensor([1000] * x.shape[0], device=device)
-                        y_cfg = torch.cat([y, y_null], dim=0)
-                        grid_cfg = torch.cat([grid, grid], dim=0)
-                        mask_cfg = torch.cat([mask, mask], dim=0)
-                        size_cfg = torch.cat([size, size], dim=0)
-                        model_kwargs_cfg = dict(y=y_cfg, grid=grid_cfg.long(), mask=mask_cfg, size=size_cfg)
-
-                        for i in range(perflow_solver_step):
-                            sigma_next_i = sigma_list[i+1]
-                            sigma_current_i = sigma_list[i]
-                            t_cfg = sigma_current_i.repeat(x.shape[0]*2).to(device=device)
-                            x_input = torch.cat([xt, xt], dim=0)
-                            model_output = pretrained_model(x_input, t_cfg, **model_kwargs_cfg)
-
-                            C_cfg = 3 * 2 * 2
-                            #eps, rest = model_output[:, :, :C_cfg], model_output[:, :, C_cfg:]
-                            noise_pred_cond, noise_pred_uncond = model_output.chunk(2, dim=0)
-                            noise_pred = noise_pred_uncond + cfg_scale.to(device=device) * (noise_pred_cond - noise_pred_uncond)
-                            #eps = torch.cat([half_eps, half_eps], dim=0)
-                            #noise_pred = torch.cat([eps, rest], dim=2)
-                            #noise_pred, _ = noise_pred.chunk(2, dim=0)
-                            xt = xt + (sigma_next_i - sigma_current_i) * noise_pred
-            else:
-                ratio_next = sigma_next.clone()
-                while len(ratio_next.shape) < x0.ndim:
-                    ratio_next = ratio_next.unsqueeze(-1)
-                xt = x0 * (1-ratio_next) + x * ratio_next
-                #xt = torch.randn_like(x) * (1-ratio_next) + x * ratio_next
-
-            if args.reflow:
-                if args.edm_sigmas:
-                    xt_input = x + sigmas[layer_idx] * x0
-                else:
-                    xt_input = x0 * (1-ratio) + x * ratio
-                per_flow_ratio = torch.randint(0, 1000, (x.shape[0],)) / 1000
-                per_flow_ratio = per_flow_ratio.to(device=device)
-                #per_flow_ratio = torch.rand(x.shape[0]).to(device=device)
-                t_input = sigma_current + per_flow_ratio.clone() * (sigma_next - sigma_current)
-                while len(per_flow_ratio.shape) < x0.ndim:
-                    per_flow_ratio = per_flow_ratio.unsqueeze(-1)
-                x_input = xt_input * (1-per_flow_ratio) + xt * per_flow_ratio
-                target = (xt - xt_input) / (sigma_next - sigma_current)
-                weight = 1 #/ (sigma_next - sigma_current)
-
-                if args.double:
-                    if layer_idx != number_of_perflow - 1:
-                        ratio_next_2 = sigmas[layer_idx+2].clone()
-                        while len(ratio_next_2.shape) < x0.ndim:
-                            ratio_next_2 = ratio_next_2.unsqueeze(-1)
-                        xt_2 = x0 * (1-ratio_next_2) + x * ratio_next_2
-                        target_plus = (xt_2 - xt) / (sigmas[layer_idx+2] - sigma_next)
-
-            else:
-                if args.edm_sigmas:
-                    target = (xt - x_input) / (sigma_next - sigma_current)
-                    weight = 1.
-                else:
-                    target = (xt - x_input) / (sigma_next - sigma_current)
-                    x_input = x0 * (1-ratio) + x * ratio
-                    weight = 1.
+                x_input = x0 * (1-ratio) + x * ratio
                 t_input = sigma_current.repeat(x.shape[0]).to(device=device)
+            
+            with accelerator.autocast():
+                _, _ = get_flexible_mask_and_ratio(model_kwargs, x_input)
+                if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                    pred_model = model.module.forward_run_layer_from_target_layer(x_input, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx)
+                    pred_model = model.module.unpatchify(pred_model, (H, W))
+                    x0 = model.module.unpatchify(x0, (H, W))
+                else:
+                    pred_model = model.forward_run_layer_from_target_layer(x_input, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx)
+                    pred_model = model.unpatchify(pred_model, (H, W))
+                    x0 = model.unpatchify(x0, (H, W))
 
-            if diffusion_cfg.distillation_network_config.params.fourier_basis:
-                t_next = sigma_next.repeat(x.shape[0]).to(device=device)
+                gan_loss = gan_guidance(inputs=x0, reconstructions=pred_model, optimizer_idx=optimizer_idx)
+            
+            # if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+            #     d_weight = calculate_adaptive_weight(loss, gan_loss, last_layer=model.module.final_layer[-1].linear.weight)
+            # else:
+            #     d_weight = calculate_adaptive_weight(loss, gan_loss, last_layer=model.final_layer[-1].linear.weight)
+            d_weight = 1.0
+            loss += d_weight * gan_loss
+            optimizer.zero_grad()
+            accelerator.backward(loss)
+            optimizer_idx = False
+
+            if accelerator.sync_gradients and accelerate_cfg.max_grad_norm > 0.:
+                all_norm = accelerator.clip_grad_norm_(
+                    model.parameters(), accelerate_cfg.max_grad_norm
+                )
+            optimizer.step()
+            lr_scheduler.step()
+            # Gather the losses across all processes for logging (if we use distributed training).
+            avg_loss = accelerator.gather(loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
+            gan_avg_loss = accelerator.gather(gan_loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
+            train_loss += avg_loss.item() / grad_accu_steps
+
+            #gan_guidance.train()
+
+            # Checks if the accelerator has performed an optimization step behind the scenes; Check gradient accumulation
+            if accelerator.sync_gradients: 
+                if args.use_ema:
+                    # update_ema(ema_model, deepcopy(model).type(ema_dtype), args.ema_decay)
+                    update_ema(ema_model, model, args.ema_decay)
+                    
+                progress_bar.update(1)
+                global_steps += 1
+                if getattr(accelerate_cfg, 'logger', 'wandb') != None:
+                    accelerator.log({"train_loss": train_loss}, step=global_steps)
+                    accelerator.log({"gan_loss": gan_avg_loss.item()}, step=global_steps)
+                    accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=global_steps)
+                    if accelerate_cfg.max_grad_norm != 0.0:
+                        accelerator.log({"grad_norm": all_norm.item()}, step=global_steps)
+                train_loss = 0.0
+                if global_steps % accelerate_cfg.checkpointing_steps == 0:
+                    if accelerate_cfg.checkpoints_total_limit is not None:
+                        checkpoints = os.listdir(ckptdir)
+                        checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
+                        checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+
+                        # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
+                        if accelerator.is_main_process and len(checkpoints) >= accelerate_cfg.checkpoints_total_limit:
+                            num_to_remove = len(checkpoints) - accelerate_cfg.checkpoints_total_limit + 1
+                            removing_checkpoints = checkpoints[0:num_to_remove]
+
+                            logger.info(
+                                f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
+                            )
+                            logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
+
+                            for removing_checkpoint in removing_checkpoints:
+                                removing_checkpoint = os.path.join(ckptdir, removing_checkpoint)
+                                shutil.rmtree(removing_checkpoint)
+
+                    save_path = os.path.join(ckptdir, f"checkpoint-{global_steps}")
+                    if accelerator.is_main_process:
+                        os.makedirs(save_path)
+                    accelerator.wait_for_everyone()
+                    accelerator.save_state(save_path)
+                    logger.info(f"Saved state to {save_path}")
+                    accelerator.wait_for_everyone()
+                    
+                if global_steps in accelerate_cfg.checkpointing_steps_list:
+                    save_path = os.path.join(ckptdir, f"save-checkpoint-{global_steps}")
+                    accelerator.wait_for_everyone()
+                    accelerator.save_state(save_path)
+                    logger.info(f"Saved state to {save_path}")
+                    accelerator.wait_for_everyone()
+        
+        else:
+            model.eval()
+            layer_idx = -1
+            if args.overlap:
+                if layer_idx == 0:
+                    sigma_current = sigmas[layer_idx]
+                else:
+                    sigma_current = sigmas[layer_idx] - 1/(number_of_perflow*2)
             else:
-                t_next = None
-
-            with accelerator.accumulate(model):
-                # save memory for x, grid, mask
-                # forward model and compute loss
+                sigma_current = sigmas[layer_idx]
+            
+            if args.edm_sigmas:
+                x_input = x + sigmas[layer_idx] * x0
+            else:
+                ratio = sigma_current.clone()
+                while len(ratio.shape) < x0.ndim:
+                    ratio = ratio.unsqueeze(-1)
+                x_input = x0 * (1-ratio) + x * ratio
+                t_input = sigma_current.repeat(x.shape[0]).to(device=device)
+            
+            with torch.no_grad():
                 with accelerator.autocast():
                     _, _ = get_flexible_mask_and_ratio(model_kwargs, x_input)
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                        pred_model = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                        pred_model = model.module.forward_run_layer_from_target_layer(x_input, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx).detach()
+                        pred_model = model.module.unpatchify(pred_model, (H, W))
+                        x0 = model.module.unpatchify(x0, (H, W))
                     else:
-                        pred_model = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
-                    
-                    # target = target.reshape(target.shape[0], -1, n_patch_h, 2, n_patch_w, 2)
-                    # target = rearrange(target, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
-                    # target = target.permute(0, 2, 1)
-                    
-                losses = mean_flat(((pred_model - target)**2)) * weight
-                loss += losses.mean()
-
-                if args.consistency_loss:
-                    xt_plus = x0 * (1-ratio_next) + x * ratio_next
-                    xt_current = x0 * (1-ratio) + x * ratio
-                    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                        pred_model_xt = model.module.forward_run_layer_from_target_layer(xt_current, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx)
-                        
-                        if layer_idx == number_of_perflow - 1:
-                            pred_model_xt_plus = x
-                        else:
-                            with torch.no_grad():
-                                pred_model_xt_plus = model.module.forward_run_layer_from_target_layer(xt_plus, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx+1).detach()
-                    else:
-                        pred_model_xt = model.forward_run_layer_from_target_layer(xt_current, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx)
-
-                        if layer_idx == number_of_perflow - 1:
-                            pred_model_xt_plus = x
-                        else:
-                            with torch.no_grad():
-                                pred_model_xt_plus = model.forward_run_layer_from_target_layer(xt_plus, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx+1).detach()
-
-                    loss_consistency = mean_flat((((pred_model_xt_plus - pred_model_xt)) ** 2)) * weight
-                    loss += loss_consistency.mean()
-
-                if args.double:
-                    if layer_idx != number_of_perflow - 1:
-                        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                            _, intermediate_layers = model.module.forward_run_layer_from_target_layer(x_input, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx, target_end_idx=layer_idx+1, return_all_layers=True)
-                        else:
-                            _, intermediate_layers = model.forward_run_layer_from_target_layer(x_input, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx, target_end_idx=layer_idx+1, return_all_layers=True)
-
-                        loss_double = mean_flat((((intermediate_layers[-1] - target_plus)) ** 2)) * weight
-                        loss += loss_double.mean()
-
-        # Backpropagate
-        loss = loss / (number_of_perflow)
-        optimizer.zero_grad()
-        accelerator.backward(loss)
-        if accelerator.sync_gradients and accelerate_cfg.max_grad_norm > 0.:
-            all_norm = accelerator.clip_grad_norm_(
-                model.parameters(), accelerate_cfg.max_grad_norm
-            )
-        optimizer.step()
-        lr_scheduler.step()
-        # Gather the losses across all processes for logging (if we use distributed training).
-        avg_loss = accelerator.gather(loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
-        train_loss += avg_loss.item() / grad_accu_steps
-
-        # Checks if the accelerator has performed an optimization step behind the scenes; Check gradient accumulation
-        if accelerator.sync_gradients: 
-            if args.use_ema:
-                # update_ema(ema_model, deepcopy(model).type(ema_dtype), args.ema_decay)
-                update_ema(ema_model, model, args.ema_decay)
-                
-            progress_bar.update(1)
-            global_steps += 1
-            if getattr(accelerate_cfg, 'logger', 'wandb') != None:
-                accelerator.log({"train_loss": train_loss}, step=global_steps)
-                accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=global_steps)
-                if accelerate_cfg.max_grad_norm != 0.0:
-                    accelerator.log({"grad_norm": all_norm.item()}, step=global_steps)
-            train_loss = 0.0
-            if global_steps % accelerate_cfg.checkpointing_steps == 0:
-                if accelerate_cfg.checkpoints_total_limit is not None:
-                    checkpoints = os.listdir(ckptdir)
-                    checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
-                    checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
-
-                    # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                    if accelerator.is_main_process and len(checkpoints) >= accelerate_cfg.checkpoints_total_limit:
-                        num_to_remove = len(checkpoints) - accelerate_cfg.checkpoints_total_limit + 1
-                        removing_checkpoints = checkpoints[0:num_to_remove]
-
-                        logger.info(
-                            f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
-                        )
-                        logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
-
-                        for removing_checkpoint in removing_checkpoints:
-                            removing_checkpoint = os.path.join(ckptdir, removing_checkpoint)
-                            shutil.rmtree(removing_checkpoint)
-
-                save_path = os.path.join(ckptdir, f"checkpoint-{global_steps}")
-                if accelerator.is_main_process:
-                    os.makedirs(save_path)
-                accelerator.wait_for_everyone()
-                accelerator.save_state(save_path)
-                logger.info(f"Saved state to {save_path}")
-                accelerator.wait_for_everyone()
-                
-            if global_steps in accelerate_cfg.checkpointing_steps_list:
-                save_path = os.path.join(ckptdir, f"save-checkpoint-{global_steps}")
-                accelerator.wait_for_everyone()
-                accelerator.save_state(save_path)
-                logger.info(f"Saved state to {save_path}")
-                accelerator.wait_for_everyone()
+                        pred_model = model.forward_run_layer_from_target_layer(x_input, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx).detach()
+                        pred_model = model.unpatchify(pred_model, (H, W))
+                        x0 = model.unpatchify(x0, (H, W))
             
+            with accelerator.autocast():
+                loss = gan_guidance(inputs=x0, reconstructions=pred_model, optimizer_idx=optimizer_idx)
+
+            optimizer_d.zero_grad()
+            accelerator.backward(loss)
+            if accelerator.sync_gradients and accelerate_cfg.max_grad_norm > 0.:
+                all_norm = accelerator.clip_grad_norm_(
+                    gan_guidance.parameters(), accelerate_cfg.max_grad_norm
+                )
+            optimizer_d.step()
+            optimizer_idx = True
+            
+            # Gather the losses across all processes for logging
+            avg_d_loss = accelerator.gather(loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
+            
+            if getattr(accelerate_cfg, 'logger', 'wandb') != None and accelerator.sync_gradients:
+                accelerator.log({"discriminator_loss": avg_d_loss.item()}, step=global_steps)
+            
+            model.train()
+        
+
+        if accelerator.sync_gradients:
             if global_steps % accelerate_cfg.evaluation_steps == 0:
                 model.eval()
                 with torch.no_grad():

@@ -24,31 +24,27 @@ diffusion:
   network_config:
     target: fit.model.fit_model.FiT
     params:
-      context_size: 1024
+      context_size: 256
       patch_size: 2
       in_channels: 4
-      hidden_size: 2304
-      depth: 40
-      num_heads: 24
+      hidden_size: 1152
+      depth: 36
+      num_heads: 16
       mlp_ratio: 4.0
       class_dropout_prob: 0.1
       num_classes: 1000
       learn_sigma: false
       use_sit: true
-      use_checkpoint: false
       use_swiglu: true
       use_swiglu_large: false
+      use_checkpoint: True
       q_norm: layernorm
       k_norm: layernorm
       qk_norm_weight: false
       rel_pos_embed: rope
-      custom_freqs: ntk-aware
-      decouple: true
-      ori_max_pe_len: 16
-      online_rope: true
       abs_pos_embed: null
       adaln_type: lora
-      adaln_lora_dim: 576
+      adaln_lora_dim: 288
       # pretrain_ckpt: ./checkpoints/FiTv2/FiTv2_3B_HRFT/model_ema.safetensors
       # ignore_keys: ['x_embedder', 'bias', 'LN', 'final_layer']
       # finetune: partial
@@ -60,7 +56,7 @@ diffusion:
       patch_size: 2
       in_channels: 4
       hidden_size: 1152
-      depth: 36
+      depth: 60
       num_heads: 16
       mlp_ratio: 4.0
       class_dropout_prob: 0.1
@@ -77,7 +73,7 @@ diffusion:
       abs_pos_embed: null
       adaln_type: normal
       adaln_lora_dim: 288
-      number_of_perflow: 4
+      number_of_perflow: 10
       overlap: true
       fourier_basis: false
       perlayer_embedder: true
@@ -91,14 +87,14 @@ data:
       target_len: 256
       random: 'crop'
       loader:
-        batch_size: 24
-        num_workers: 8
+        batch_size: 12
+        num_workers: 4
         shuffle: true
 
 
 accelerate:
   # others
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   mixed_precision: 'bf16'
   # training step config
   num_train_epochs: 
