@@ -828,10 +828,10 @@ def main():
 
             # Backpropagate
             loss = loss / (number_of_perflow)
-
+            avg_loss = accelerator.gather(loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
             # Calculate the loss for the discriminator
             #gan_guidance.eval()
-            layer_idx = -1
+            layer_idx = number_of_perflow-1
             if args.overlap:
                 if layer_idx == 0:
                     sigma_current = sigmas[layer_idx]
@@ -879,7 +879,7 @@ def main():
             optimizer.step()
             lr_scheduler.step()
             # Gather the losses across all processes for logging (if we use distributed training).
-            avg_loss = accelerator.gather(loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
+            #avg_loss = accelerator.gather(loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
             gan_avg_loss = accelerator.gather(gan_loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
             train_loss += avg_loss.item() / grad_accu_steps
 
