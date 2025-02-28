@@ -867,7 +867,7 @@ def main():
             else:
                 d_weight = calculate_adaptive_weight(loss, gan_loss, last_layer=model.final_layer[-1].linear.weight)
             #d_weight = 1.0
-            loss += d_weight * gan_loss
+            loss += 0.1 * d_weight * gan_loss
             optimizer.zero_grad()
             accelerator.backward(loss)
             optimizer_idx = False
@@ -897,6 +897,7 @@ def main():
                     accelerator.log({"train_loss": train_loss}, step=global_steps)
                     accelerator.log({"gan_loss": gan_avg_loss.item()}, step=global_steps)
                     accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=global_steps)
+                    accelerator.log({"d_weight": d_weight}, step=global_steps)
                     if accelerate_cfg.max_grad_norm != 0.0:
                         accelerator.log({"grad_norm": all_norm.item()}, step=global_steps)
                 train_loss = 0.0
@@ -937,7 +938,7 @@ def main():
         
         else:
             model.eval()
-            layer_idx = -1
+            layer_idx = number_of_perflow-1
             if args.overlap:
                 if layer_idx == 0:
                     sigma_current = sigmas[layer_idx]

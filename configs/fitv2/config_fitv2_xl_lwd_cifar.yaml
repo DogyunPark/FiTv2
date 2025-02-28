@@ -83,6 +83,15 @@ diffusion:
       perlayer_embedder: true
       overlap: true
       number_of_shared_blocks: 0
+  gan_guidance_config:
+    sat: true
+    params:
+      disc_num_layers: 3
+      disc_in_channels: 3
+      disc_weight: 1.0
+      disc_ndf: 64
+      disc_loss: "hinge"
+
 data:
   target: fit.data.in1k_latent_dataset.INLatentLoader
   params:
@@ -91,7 +100,7 @@ data:
       target_len: 256
       random: 'random'
       loader:
-        batch_size: 12
+        batch_size: 24
         num_workers: 4
         shuffle: True
 
