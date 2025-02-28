@@ -862,11 +862,11 @@ def main():
 
                 gan_loss = gan_guidance(inputs=x0, reconstructions=pred_model, optimizer_idx=optimizer_idx)
             
-            # if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-            #     d_weight = calculate_adaptive_weight(loss, gan_loss, last_layer=model.module.final_layer[-1].linear.weight)
-            # else:
-            #     d_weight = calculate_adaptive_weight(loss, gan_loss, last_layer=model.final_layer[-1].linear.weight)
-            d_weight = 1.0
+            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                d_weight = calculate_adaptive_weight(loss, gan_loss, last_layer=model.module.final_layer[-1].linear.weight)
+            else:
+                d_weight = calculate_adaptive_weight(loss, gan_loss, last_layer=model.final_layer[-1].linear.weight)
+            #d_weight = 1.0
             loss += d_weight * gan_loss
             optimizer.zero_grad()
             accelerator.backward(loss)
