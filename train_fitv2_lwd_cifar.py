@@ -422,23 +422,8 @@ def main():
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     fixed_params = sum(p.numel() for p in model.parameters() if not p.requires_grad) 
-    logger.info(f"Trainable Generator parameters: {trainable_params}")
-    logger.info(f"Fixed Generator parameters: {fixed_params}")
-
-    if diffusion_cfg.gan_guidance_config.sat:
-        from fit.losses.perceptual import LPIPSWithDiscriminator2D
-        gan_guidance = LPIPSWithDiscriminator2D(
-            disc_in_channels=diffusion_cfg.gan_guidance_config.params.disc_in_channels,
-            disc_num_layers=diffusion_cfg.gan_guidance_config.params.disc_num_layers,
-            disc_weight=diffusion_cfg.gan_guidance_config.params.disc_weight,
-            disc_ndf=diffusion_cfg.gan_guidance_config.params.disc_ndf,
-            disc_loss=diffusion_cfg.gan_guidance_config.params.disc_loss,
-        ).to(device=device)
-
-        trainable_params = sum(p.numel() for p in gan_guidance.parameters() if p.requires_grad)
-        fixed_params = sum(p.numel() for p in gan_guidance.parameters() if not p.requires_grad) 
-        logger.info(f"Trainable Discriminator parameters: {trainable_params}")
-        logger.info(f"Fixed Discriminator parameters: {fixed_params}")
+    logger.info(f"Trainable parameters: {trainable_params}")
+    logger.info(f"Fixed parameters: {fixed_params}")
 
     number_of_perflow = args.number_of_perflow
     number_of_layers_for_perflow = args.number_of_layers_for_perflow
@@ -450,6 +435,10 @@ def main():
     logger.info(f"Number of layers for perflow: {number_of_layers_for_perflow}")
     logger.info(f"Total sampling steps: {number_of_perflow * solver_step}")
     
+    #scheduler = FlowMatchEulerDiscreteScheduler(invert_sigmas=True)
+    #scheduler.set_timesteps(num_inference_steps, device=device)
+    #timesteps = scheduler.timesteps
+    #sigmas = scheduler.sigmas
     if args.edm_sigmas:
         sigmas = t_steps
     else:
@@ -482,12 +471,10 @@ def main():
         ema_model = accelerator.prepare_model(ema_model, device_placement=False)
     else:
         model = accelerator.prepare_model(model, device_placement=False)
-    
-    if diffusion_cfg.gan_guidance_config.sat:
-        gan_guidance = accelerator.prepare_model(gan_guidance, device_placement=False)
         
     # In SiT, we use transport instead of diffusion
     transport = create_transport(**OmegaConf.to_container(diffusion_cfg.transport))  # default: velocity; 
+    # schedule_sampler = create_named_schedule_sampler()
 
     # Setup Dataloader
     total_batch_size = data_cfg.params.train.loader.batch_size * accelerator.num_processes * grad_accu_steps
@@ -529,6 +516,7 @@ def main():
     optimizer = get_obj_from_str(optimizer_cfg["target"])(
         params, lr=learning_rate, **optimizer_cfg.get("params", dict())
     )
+    #optimizer = CAME(params, lr=learning_rate, **accelerate_cfg.optimizer.params)
     lr_scheduler = get_scheduler(
         accelerate_cfg.lr_scheduler,
         optimizer=optimizer,
@@ -622,6 +610,7 @@ def main():
     y_test = torch.randint(0, 10, (test_batch_size,), device=device)
     print('Class: ', y_test)
     noise_test = torch.randn((test_batch_size, n_patch_h*n_patch_w, (1**1)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
+    noise_test_list = [torch.randn((test_batch_size, n_patch_h*n_patch_w, (1**1)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device) for _ in range(number_of_perflow-1)]
     
     grid_h = torch.arange(n_patch_h, dtype=torch.long)
     grid_w = torch.arange(n_patch_w, dtype=torch.long)
@@ -666,7 +655,7 @@ def main():
                 if layer_idx == 0:
                     sigma_current = sigmas[layer_idx]
                 else:
-                    sigma_current = sigmas[layer_idx] - 1/(number_of_perflow*2)
+                    sigma_current = sigmas[layer_idx] - 1/(number_of_perflow*5)
             else:
                 sigma_current = sigmas[layer_idx]
 
@@ -902,7 +891,7 @@ def main():
                 accelerator.wait_for_everyone()
             
             if global_steps % accelerate_cfg.evaluation_steps == 0:
-                model.eval()
+                ema_model.eval()
                 with torch.no_grad():
                     # prepare for x
                     grid_h = torch.arange(n_patch_h, dtype=torch.long)
@@ -933,7 +922,7 @@ def main():
                         t_test = torch.zeros_like(cfg_scale_cond_test)
 
                     with accelerator.autocast():
-                        output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, noise=noise_test)
+                        output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, noise=noise_test_list)
 
                     samples = output_test[:, : n_patch_h*n_patch_w]
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
@@ -952,9 +941,9 @@ def main():
                     with accelerator.autocast():
                         #output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test)
                         if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6)
+                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list)
                         else:
-                            output_test = ema_model.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6)
+                            output_test = ema_model.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list)
 
                     samples = output_test[:, : n_patch_h*n_patch_w]
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
@@ -969,9 +958,8 @@ def main():
                         # for i, img_tensor in enumerate(samples):
                         #     img = Image.fromarray(img_tensor.cpu().numpy())
                         #     img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-{i}-NFE6.jpg"))
-                model.train()
 
-            if args.eval_fid and global_steps % accelerate_cfg.eval_fid_steps == 0 and global_steps > 50000 and accelerator.is_main_process:
+            if args.eval_fid and global_steps % accelerate_cfg.eval_fid_steps == 0 and global_steps > 0 and accelerator.is_main_process:
                 with torch.no_grad():
                     number = 0
                     ema_model.eval()
@@ -997,9 +985,9 @@ def main():
                         with accelerator.autocast():
                             #output_test = ema_model(latents, t_test, cfg_scale_cond_test, **model_kwargs_fid, number_of_step_perflow=6, noise=latents)
                             if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                                output_test = ema_model.module.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=6)
+                                output_test = ema_model.module.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=2)
                             else:
-                                output_test = ema_model.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=6)
+                                output_test = ema_model.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=2)
 
                         samples = output_test[:, : n_patch_h*n_patch_w]
                         if isinstance(model, torch.nn.parallel.DistributedDataParallel):

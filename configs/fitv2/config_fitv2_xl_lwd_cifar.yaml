@@ -67,15 +67,15 @@ diffusion:
       num_classes: 10
       learn_sigma: false
       use_sit: true
-      use_swiglu: true
+      use_swiglu: false
       use_swiglu_large: false
-      use_checkpoint: false
+      use_checkpoint: true
       q_norm: layernorm
       k_norm: layernorm
       qk_norm_weight: false
       rel_pos_embed: rope
       abs_pos_embed: null
-      adaln_type: normal
+      adaln_type: lora
       adaln_lora_dim: 288
       number_of_perflow: 6
       fourier_basis: false
@@ -83,8 +83,9 @@ diffusion:
       perlayer_embedder: true
       overlap: true
       number_of_shared_blocks: 0
+      max_cached_len: 1024
   gan_guidance_config:
-    sat: true
+    sat: false
     params:
       disc_num_layers: 3
       disc_in_channels: 3
@@ -100,14 +101,14 @@ data:
       target_len: 256
       random: 'random'
       loader:
-        batch_size: 24
+        batch_size: 12
         num_workers: 4
         shuffle: True
 
 
 accelerate:
   # others
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   mixed_precision: 'fp16'
   # training step config
   num_train_epochs: 

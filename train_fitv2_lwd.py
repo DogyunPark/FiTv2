@@ -227,6 +227,7 @@ def parse_args():
         default=5000,
         help="The number of samples to evaluate FID."
     )
+
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -382,10 +383,10 @@ def main():
     else:
         learning_rate = accelerate_cfg.learning_rate
 
-    
-    pretrained_model = instantiate_from_config(diffusion_cfg.network_config).to(device=device)
-    init_from_ckpt(pretrained_model, checkpoint_dir=args.pretrain_ckpt, ignore_keys=None, verbose=True)
-    pretrained_model.eval()
+    if args.distillation:
+        pretrained_model = instantiate_from_config(diffusion_cfg.network_config).to(device=device)
+        init_from_ckpt(pretrained_model, checkpoint_dir=args.pretrain_ckpt, ignore_keys=None, verbose=True)
+        pretrained_model.eval()
 
     model = instantiate_from_config(diffusion_cfg.distillation_network_config).to(device=device)
     #init_from_ckpt(model, checkpoint_dir=args.pretrain_ckpt2, ignore_keys=None, verbose=True)
@@ -585,6 +586,7 @@ def main():
     print('Generating images with resolution: ', H*8, 'x', W*8)
     y_test = torch.randint(0, 1000, (test_batch_size,), device=device)
     noise_test = torch.randn((test_batch_size, n_patch_h*n_patch_w, (2**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
+    noise_test_list = [torch.randn((test_batch_size, n_patch_h*n_patch_w, (2**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device) for _ in range(number_of_perflow-1)]
 
     for step, batch in enumerate(train_dataloader, start=global_steps):
         for batch_key in batch.keys():
@@ -665,7 +667,7 @@ def main():
 
             if args.reflow:
                 xt_input = x0 * (1-ratio) + x * ratio
-                per_flow_ratio = torch.randint(0, 10, (x.shape[0],)) / 10
+                per_flow_ratio = torch.randint(0, 1000, (x.shape[0],)) / 1000
                 #per_flow_ratio = torch.rand(x.shape[0]).to(device=device)
                 per_flow_ratio = per_flow_ratio.to(device=device)
                 t_input = sigma_current + per_flow_ratio.clone() * (sigma_next - sigma_current)
@@ -805,7 +807,7 @@ def main():
                     t_test = torch.zeros_like(cfg_scale_cond_test)
 
                     with accelerator.autocast():
-                        output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test)
+                        output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, noise=noise_test_list)
 
                     samples = output_test[..., : n_patch_h*n_patch_w]
                     if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
@@ -814,19 +816,20 @@ def main():
                         samples = ema_model.unpatchify(samples, (H, W))
                     samples = samples.to(torch.bfloat16)     
                     samples = vae.decode(samples / vae.config.scaling_factor).sample
-                    samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
+                    torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}.jpg"), normalize=True, scale_each=True)
+                    # samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
                     
-                    if accelerator.is_main_process:
-                        for i, img_tensor in enumerate(samples):
-                            img = Image.fromarray(img_tensor.cpu().numpy())
-                            img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-{i}.jpg"))
+                    # if accelerator.is_main_process:
+                    #     for i, img_tensor in enumerate(samples):
+                    #         img = Image.fromarray(img_tensor.cpu().numpy())
+                    #         img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-{i}.jpg"))
                     
                     # CFG Sampling
                     with accelerator.autocast():
                         if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 4, **model_kwargs_test, number_of_step_perflow=10)
+                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 4, **model_kwargs_test, number_of_step_perflow=10, noise=noise_test_list)
                         else:
-                            output_test = ema_model.forward_cfg(noise_test, t_test, 4, **model_kwargs_test, number_of_step_perflow=10)
+                            output_test = ema_model.forward_cfg(noise_test, t_test, 4, **model_kwargs_test, number_of_step_perflow=10, noise=noise_test_list)
 
                     samples = output_test[..., : n_patch_h*n_patch_w]
                     if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
@@ -835,12 +838,13 @@ def main():
                         samples = ema_model.unpatchify(samples, (H, W))
                     samples = samples.to(torch.bfloat16)     
                     samples = vae.decode(samples / vae.config.scaling_factor).sample
-                    samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
+                    torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-NFE10.jpg"), normalize=True, scale_each=True)
+                    # samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
                     
-                    if accelerator.is_main_process:
-                        for i, img_tensor in enumerate(samples):
-                            img = Image.fromarray(img_tensor.cpu().numpy())
-                            img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-{i}-NFE10.jpg"))
+                    # if accelerator.is_main_process:
+                    #     for i, img_tensor in enumerate(samples):
+                    #         img = Image.fromarray(img_tensor.cpu().numpy())
+                    #         img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-{i}-NFE10.jpg"))
             
             if args.eval_fid and global_steps % accelerate_cfg.eval_fid_steps == 0 and global_steps > 0 and accelerator.is_main_process:
                 with torch.no_grad():

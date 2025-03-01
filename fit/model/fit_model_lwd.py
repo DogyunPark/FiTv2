@@ -87,7 +87,7 @@ class FiTLwD(nn.Module):
         self.online_rope = online_rope
         self.time_shifting = time_shifting
         self.sigmas = torch.linspace(0, 1, number_of_perflow+1)
-        self.sigmas_overlap = self.sigmas - 1/(number_of_perflow*2)
+        self.sigmas_overlap = self.sigmas - 1/(number_of_perflow*5)
         self.overlap = overlap
         self.perlayer_embedder = perlayer_embedder
         self.number_of_perflow = number_of_perflow
@@ -355,7 +355,11 @@ class FiTLwD(nn.Module):
                 x = (sigma_list[step+1] - sigma_list[step]) * x + residual
             
             if self.overlap and i != len(self.blocks) // self.number_of_layers_for_perflow - 1:
-                x = (self.sigmas_overlap[i+1] / self.sigmas[i+1]) * x + (((1-self.sigmas_overlap[i+1])**2 - ((1-self.sigmas[i+1])**2 * (self.sigmas_overlap[i+1])**2 / (self.sigmas[i+1])**2))).sqrt() * torch.randn_like(x)
+                if noise is not None:
+                    add_noise = noise[i]
+                else:
+                    add_noise = torch.randn_like(x)
+                x = (self.sigmas_overlap[i+1] / self.sigmas[i+1]) * x + (((1-self.sigmas_overlap[i+1])**2 - ((1-self.sigmas[i+1])**2 * (self.sigmas_overlap[i+1])**2 / (self.sigmas[i+1])**2))).sqrt() * add_noise
         return x
     
     def forward_run_layer(self, x, t, cfg, y, grid, mask, size=None, target_layer_start=None, target_layer_end=None, t_next=None):
@@ -503,7 +507,7 @@ class FiTLwD(nn.Module):
 
             if self.overlap and i != len(sigmas_) - 1:
                 x = (self.sigmas_overlap[i+1] / self.sigmas[i+1]) * x + (((1-self.sigmas_overlap[i+1])**2 - ((1-self.sigmas[i+1])**2 * (self.sigmas_overlap[i+1])**2 / (self.sigmas[i+1])**2))).sqrt() * torch.randn_like(x)
-                
+
         if return_all_layers:
             return x, intermediate_layers
         else:   
@@ -611,7 +615,11 @@ class FiTLwD(nn.Module):
                 x = (sigma_list[step+1] - sigma_list[step]) * x + residual
 
             if self.overlap and i != len(self.blocks) // self.number_of_layers_for_perflow - 1:
-                x = (self.sigmas_overlap[i+1] / self.sigmas[i+1]) * x + (((1-self.sigmas_overlap[i+1])**2 - ((1-self.sigmas[i+1])**2 * (self.sigmas_overlap[i+1])**2 / (self.sigmas[i+1])**2))).sqrt() * torch.randn_like(x)
+                if noise is not None:
+                    add_noise = noise[i]
+                else:
+                    add_noise = torch.randn_like(x)
+                x = (self.sigmas_overlap[i+1] / self.sigmas[i+1]) * x + (((1-self.sigmas_overlap[i+1])**2 - ((1-self.sigmas[i+1])**2 * (self.sigmas_overlap[i+1])**2 / (self.sigmas[i+1])**2))).sqrt() * add_noise
         return x
         
     def ckpt_wrapper(self, module):
