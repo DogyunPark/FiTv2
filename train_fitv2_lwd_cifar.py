@@ -604,13 +604,14 @@ def main():
     train_loss = 0.0
 
     test_batch_size = 20
-    n_patch_h, n_patch_w = 32, 32
-    H, W = n_patch_h * 1, n_patch_w * 1
+    n_patch_h, n_patch_w = 16, 16
+    patch_size = 2
+    H, W = n_patch_h * patch_size, n_patch_w * patch_size
     print('Generating images with resolution: ', H*8, 'x', W*8)
     y_test = torch.randint(0, 10, (test_batch_size,), device=device)
     print('Class: ', y_test)
-    noise_test = torch.randn((test_batch_size, n_patch_h*n_patch_w, (1**1)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
-    noise_test_list = [torch.randn((test_batch_size, n_patch_h*n_patch_w, (1**1)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device) for _ in range(number_of_perflow-1)]
+    noise_test = torch.randn((test_batch_size, n_patch_h*n_patch_w, (patch_size**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
+    noise_test_list = [torch.randn((test_batch_size, n_patch_h*n_patch_w, (patch_size**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device) for _ in range(number_of_perflow-1)]
     
     grid_h = torch.arange(n_patch_h, dtype=torch.long)
     grid_w = torch.arange(n_patch_w, dtype=torch.long)
@@ -627,7 +628,7 @@ def main():
         x, y = batch[0], batch[1]
         x = x * 2 - 1
 
-        x = x.reshape(x.shape[0], -1, n_patch_h, 1, n_patch_w, 1)
+        x = x.reshape(x.shape[0], -1, n_patch_h, patch_size, n_patch_w, patch_size)
         x = rearrange(x, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
         x = x.permute(0, 2, 1)
 
@@ -977,13 +978,13 @@ def main():
                     size_test = size_test[:, None, :]
 
                     while args.eval_fid_num_samples > number:
-                        latents = torch.randn((test_fid_batch_size, n_patch_h*n_patch_w, (1**1)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
+                        latents = torch.randn((test_fid_batch_size, n_patch_h*n_patch_w, (patch_size**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
                         y = torch.randint(0, 10, (test_fid_batch_size,), device=device)
 
                         model_kwargs_fid = dict(y=y, grid=grid_test.long(), mask=mask_test, size=size_test)
 
                         with accelerator.autocast():
-                            #output_test = ema_model(latents, t_test, cfg_scale_cond_test, **model_kwargs_fid, number_of_step_perflow=6, noise=latents)
+                            #output_test = ema_model(latents, t_test, cfg_scale_cond_test, **model_kwargs_fid, number_of_step_perflow=2)
                             if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
                                 output_test = ema_model.module.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=2)
                             else:
