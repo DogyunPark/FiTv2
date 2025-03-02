@@ -604,8 +604,8 @@ def main():
     train_loss = 0.0
 
     test_batch_size = 20
-    n_patch_h, n_patch_w = 16, 16
-    patch_size = 2
+    n_patch_h, n_patch_w = 32, 32
+    patch_size = 1
     H, W = n_patch_h * patch_size, n_patch_w * patch_size
     print('Generating images with resolution: ', H*8, 'x', W*8)
     y_test = torch.randint(0, 10, (test_batch_size,), device=device)
