@@ -439,6 +439,7 @@ class FiTLwD(nn.Module):
         assert target_start_idx is not None, "target_start_idx must be provided"
         target_end_idx = target_end_idx if target_end_idx is not None else (len(self.blocks)+1)
         sigmas_ = self.sigmas[target_start_idx:target_end_idx+1]
+        sigmas_overlap_ = self.sigmas_overlap[target_start_idx:target_end_idx+1]
         
         intermediate_layers = []
         y = self.y_embedder(y, self.training)           # (B, D)
@@ -454,12 +455,9 @@ class FiTLwD(nn.Module):
         for i in range(len(sigmas_)-1):
             sigma_next = sigmas_[i+1]
             if self.overlap:
-                if i == 0:
-                    sigma_current = self.sigmas[i]
-                else:
-                    sigma_current = self.sigmas_overlap[i]
+                sigma_current = sigmas_overlap_[i]
             else:
-                sigma_current = self.sigmas[i]
+                sigma_current = sigmas_[i]
             sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
 
             for step in range(number_of_step_perflow):
@@ -485,10 +483,10 @@ class FiTLwD(nn.Module):
                     x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
 
                 if self.use_checkpoint:
-                    for block in self.blocks[target_start_idx + i*self.number_of_layers_for_perflow: target_start_idx + (i+1)*self.number_of_layers_for_perflow]:
+                    for block in self.blocks[(target_start_idx + i)*self.number_of_layers_for_perflow: (target_start_idx + i+1)*self.number_of_layers_for_perflow]:
                         x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c, mask, freqs_cos, freqs_sin, global_adaln)
                 else:
-                    for block in self.blocks[target_start_idx + i*self.number_of_layers_for_perflow: target_start_idx + (i+1)*self.number_of_layers_for_perflow]:
+                    for block in self.blocks[(target_start_idx + i)*self.number_of_layers_for_perflow: (target_start_idx + i+1)*self.number_of_layers_for_perflow]:
                         x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
 
                 if self.perlayer_embedder:
@@ -505,9 +503,8 @@ class FiTLwD(nn.Module):
 
                 x = (sigma_list[step+1].expand(x.shape[0]).to(x.device)[:, None, None] - t_input[:, None, None]) * x + residual
 
-            if self.overlap and i != len(sigmas_) - 1:
+            if self.overlap and i != len(sigmas_) - 2:
                 x = (self.sigmas_overlap[i+1] / self.sigmas[i+1]) * x + (((1-self.sigmas_overlap[i+1])**2 - ((1-self.sigmas[i+1])**2 * (self.sigmas_overlap[i+1])**2 / (self.sigmas[i+1])**2))).sqrt() * torch.randn_like(x)
-
         if return_all_layers:
             return x, intermediate_layers
         else:   
