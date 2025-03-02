@@ -381,7 +381,7 @@ class FiTLwD(nn.Module):
             t = self.t_embedder[target_layer_start // self.number_of_layers_for_perflow](t)        
         else:
             t = self.t_embedder(t)        
-        cfg = self.c_embedder(cfg)
+        #cfg = self.c_embedder(cfg)
         if self.perlayer_embedder:
             y = self.y_embedder[target_layer_start // self.number_of_layers_for_perflow](y, self.training)           # (B, D)
         else:
