@@ -60,7 +60,7 @@ diffusion:
       patch_size: 1
       in_channels: 3
       hidden_size: 384
-      depth: 96
+      depth: 60
       num_heads: 6
       mlp_ratio: 4.0
       class_dropout_prob: 0.1
@@ -82,10 +82,10 @@ diffusion:
       edm_sigmas: false
       perlayer_embedder: true
       overlap: true
-      number_of_shared_blocks: 2
+      number_of_shared_blocks: 0
       max_cached_len: 1024
   gan_guidance_config:
-    sat: false
+    sat: true
     params:
       disc_num_layers: 3
       disc_in_channels: 3
@@ -108,7 +108,7 @@ data:
 
 accelerate:
   # others
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 1
   mixed_precision: 'fp16'
   # training step config
   num_train_epochs: 

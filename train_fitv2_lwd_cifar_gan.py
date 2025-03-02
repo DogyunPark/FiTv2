@@ -418,7 +418,7 @@ def main():
         t_steps = torch.cat([pretrained_model.round_sigma(t_steps), torch.zeros_like(t_steps[:1])]) # t_N = 0
 
     model = instantiate_from_config(diffusion_cfg.distillation_network_config).to(device=device)
-    #init_from_ckpt(model, checkpoint_dir=args.pretrain_ckpt2, ignore_keys=None, verbose=True)
+    init_from_ckpt(model, checkpoint_dir=args.pretrain_ckpt2, ignore_keys=None, verbose=True)
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     fixed_params = sum(p.numel() for p in model.parameters() if not p.requires_grad) 
@@ -623,11 +623,13 @@ def main():
 
     test_batch_size = 20
     n_patch_h, n_patch_w = 32, 32
-    H, W = n_patch_h * 1, n_patch_w * 1
+    patch_size = 1
+    H, W = n_patch_h * patch_size, n_patch_w * patch_size
     print('Generating images with resolution: ', H*8, 'x', W*8)
     y_test = torch.randint(0, 10, (test_batch_size,), device=device)
     print('Class: ', y_test)
-    noise_test = torch.randn((test_batch_size, n_patch_h*n_patch_w, (1**1)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
+    noise_test = torch.randn((test_batch_size, n_patch_h*n_patch_w, (patch_size**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
+    noise_test_list = [torch.randn((test_batch_size, n_patch_h*n_patch_w, (patch_size**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device) for _ in range(number_of_perflow-1)]
     
     grid_h = torch.arange(n_patch_h, dtype=torch.long)
     grid_w = torch.arange(n_patch_w, dtype=torch.long)
@@ -645,7 +647,7 @@ def main():
         x, y = batch[0], batch[1]
         x = x * 2 - 1
 
-        x = x.reshape(x.shape[0], -1, n_patch_h, 1, n_patch_w, 1)
+        x = x.reshape(x.shape[0], -1, n_patch_h, patch_size, n_patch_w, patch_size)
         x = rearrange(x, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
         x = x.permute(0, 2, 1)
 
@@ -830,7 +832,7 @@ def main():
             loss = loss / (number_of_perflow)
             avg_loss = accelerator.gather(loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
             # Calculate the loss for the discriminator
-            #gan_guidance.eval()
+            gan_guidance.eval()
             layer_idx = number_of_perflow-1
             if args.overlap:
                 if layer_idx == 0:
@@ -839,7 +841,8 @@ def main():
                     sigma_current = sigmas[layer_idx] - 1/(number_of_perflow*2)
             else:
                 sigma_current = sigmas[layer_idx]
-            
+            sigma_next = sigmas[layer_idx+1]
+
             if args.edm_sigmas:
                 x_input = x + sigmas[layer_idx] * x0
             else:
@@ -849,18 +852,32 @@ def main():
                 x_input = x0 * (1-ratio) + x * ratio
                 t_input = sigma_current.repeat(x.shape[0]).to(device=device)
             
+            # if args.reflow:
+            #     if args.edm_sigmas:
+            #         xt_input = x + sigmas[layer_idx] * x0
+            #     else:
+            #         xt_input = x0 * (1-ratio) + x * ratio
+            #     per_flow_ratio = torch.randint(0, 1000, (x.shape[0],)) / 1000
+            #     per_flow_ratio = per_flow_ratio.to(device=device)
+            #     t_input = sigma_current + per_flow_ratio.clone() * (sigma_next - sigma_current)
+            #     while len(per_flow_ratio.shape) < x0.ndim:
+            #         per_flow_ratio = per_flow_ratio.unsqueeze(-1)
+            #     x_input = xt_input * (1-per_flow_ratio) + x0 * per_flow_ratio
+            #     target = (xt - xt_input) / (sigma_next - sigma_current)
+            #     weight = 1
+            
             with accelerator.autocast():
                 _, _ = get_flexible_mask_and_ratio(model_kwargs, x_input)
                 if isinstance(model, torch.nn.parallel.DistributedDataParallel):
                     pred_model = model.module.forward_run_layer_from_target_layer(x_input, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx)
                     pred_model = model.module.unpatchify(pred_model, (H, W))
-                    x0 = model.module.unpatchify(x0, (H, W))
+                    x = model.module.unpatchify(x, (H, W))
                 else:
                     pred_model = model.forward_run_layer_from_target_layer(x_input, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx)
                     pred_model = model.unpatchify(pred_model, (H, W))
-                    x0 = model.unpatchify(x0, (H, W))
+                    x = model.unpatchify(x, (H, W))
 
-                gan_loss = gan_guidance(inputs=x0, reconstructions=pred_model, optimizer_idx=optimizer_idx)
+                gan_loss = gan_guidance(inputs=x, reconstructions=pred_model, optimizer_idx=optimizer_idx)
             
             if isinstance(model, torch.nn.parallel.DistributedDataParallel):
                 d_weight = calculate_adaptive_weight(loss, gan_loss, last_layer=model.module.final_layer[-1].linear.weight)
@@ -883,7 +900,7 @@ def main():
             gan_avg_loss = accelerator.gather(gan_loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
             train_loss += avg_loss.item() / grad_accu_steps
 
-            #gan_guidance.train()
+            gan_guidance.train()
 
             # Checks if the accelerator has performed an optimization step behind the scenes; Check gradient accumulation
             if accelerator.sync_gradients: 
@@ -956,20 +973,34 @@ def main():
                 x_input = x0 * (1-ratio) + x * ratio
                 t_input = sigma_current.repeat(x.shape[0]).to(device=device)
             
+            # if args.reflow:
+            #     if args.edm_sigmas:
+            #         xt_input = x + sigmas[layer_idx] * x0
+            #     else:
+            #         xt_input = x0 * (1-ratio) + x * ratio
+            #     per_flow_ratio = torch.randint(0, 1000, (x.shape[0],)) / 1000
+            #     per_flow_ratio = per_flow_ratio.to(device=device)
+            #     t_input = sigma_current + per_flow_ratio.clone() * (sigma_next - sigma_current)
+            #     while len(per_flow_ratio.shape) < x0.ndim:
+            #         per_flow_ratio = per_flow_ratio.unsqueeze(-1)
+            #     x_input = xt_input * (1-per_flow_ratio) + x0 * per_flow_ratio
+            #     target = (xt - xt_input) / (sigma_next - sigma_current)
+            #     weight = 1
+            
             with torch.no_grad():
                 with accelerator.autocast():
                     _, _ = get_flexible_mask_and_ratio(model_kwargs, x_input)
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
                         pred_model = model.module.forward_run_layer_from_target_layer(x_input, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx).detach()
                         pred_model = model.module.unpatchify(pred_model, (H, W))
-                        x0 = model.module.unpatchify(x0, (H, W))
+                        x = model.module.unpatchify(x, (H, W))
                     else:
                         pred_model = model.forward_run_layer_from_target_layer(x_input, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx).detach()
                         pred_model = model.unpatchify(pred_model, (H, W))
-                        x0 = model.unpatchify(x0, (H, W))
+                        x = model.unpatchify(x, (H, W))
             
-            with accelerator.autocast():
-                loss = gan_guidance(inputs=x0, reconstructions=pred_model, optimizer_idx=optimizer_idx)
+            #with accelerator.autocast():
+            loss = gan_guidance(inputs=x, reconstructions=pred_model, optimizer_idx=optimizer_idx)
 
             optimizer_d.zero_grad()
             accelerator.backward(loss)
@@ -1022,7 +1053,7 @@ def main():
                         t_test = torch.zeros_like(cfg_scale_cond_test)
 
                     with accelerator.autocast():
-                        output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, noise=noise_test)
+                        output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, noise=noise_test_list)
 
                     samples = output_test[:, : n_patch_h*n_patch_w]
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
@@ -1041,9 +1072,9 @@ def main():
                     with accelerator.autocast():
                         #output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test)
                         if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6)
+                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list)
                         else:
-                            output_test = ema_model.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6)
+                            output_test = ema_model.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list)
 
                     samples = output_test[:, : n_patch_h*n_patch_w]
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
@@ -1060,7 +1091,7 @@ def main():
                         #     img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-{i}-NFE6.jpg"))
                 model.train()
 
-            if args.eval_fid and global_steps % accelerate_cfg.eval_fid_steps == 0 and global_steps > 50000 and accelerator.is_main_process:
+            if args.eval_fid and global_steps % accelerate_cfg.eval_fid_steps == 0 and global_steps > 0 and accelerator.is_main_process:
                 with torch.no_grad():
                     number = 0
                     ema_model.eval()
@@ -1078,7 +1109,7 @@ def main():
                     size_test = size_test[:, None, :]
 
                     while args.eval_fid_num_samples > number:
-                        latents = torch.randn((test_fid_batch_size, n_patch_h*n_patch_w, (1**1)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
+                        latents = torch.randn((test_fid_batch_size, n_patch_h*n_patch_w, (patch_size**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
                         y = torch.randint(0, 10, (test_fid_batch_size,), device=device)
 
                         model_kwargs_fid = dict(y=y, grid=grid_test.long(), mask=mask_test, size=size_test)
@@ -1086,9 +1117,9 @@ def main():
                         with accelerator.autocast():
                             #output_test = ema_model(latents, t_test, cfg_scale_cond_test, **model_kwargs_fid, number_of_step_perflow=6, noise=latents)
                             if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                                output_test = ema_model.module.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=6)
+                                output_test = ema_model.module.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=2)
                             else:
-                                output_test = ema_model.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=6)
+                                output_test = ema_model.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=2)
 
                         samples = output_test[:, : n_patch_h*n_patch_w]
                         if isinstance(model, torch.nn.parallel.DistributedDataParallel):
