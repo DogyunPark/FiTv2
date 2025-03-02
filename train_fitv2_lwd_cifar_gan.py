@@ -539,7 +539,7 @@ def main():
             d_params = filter(lambda p: p.requires_grad, gan_guidance.parameters())
         else:
             d_params = list(gan_guidance.parameters())
-        optimizer_d = torch.optim.AdamW(d_params, lr=1e-4, betas=(0.5, 0.9))
+        optimizer_d = torch.optim.AdamW(d_params, lr=1e-5, betas=(0.5, 0.9))
         optimizer_d = accelerator.prepare(optimizer_d)
     
     # Prepare Accelerate
@@ -884,7 +884,7 @@ def main():
             else:
                 d_weight = calculate_adaptive_weight(loss, gan_loss, last_layer=model.final_layer[-1].linear.weight)
             #d_weight = 1.0
-            loss += 0.1 * d_weight * gan_loss
+            loss += d_weight * gan_loss
             optimizer.zero_grad()
             accelerator.backward(loss)
             optimizer_idx = False
