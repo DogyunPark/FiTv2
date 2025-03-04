@@ -1,8 +1,8 @@
 import os
-os.environ['TMPDIR'] = '/hub_data2/dogyun/tmpdir'
-os.environ['TEMP'] = '/hub_data2/dogyun/tmpdir'
-os.environ['TMP'] = '/hub_data2/dogyun/tmpdir'
-os.environ['TORCH_HOME'] = '/hub_data2/dogyun/tmpdir'
+os.environ['TMPDIR'] = '/hub_data4/dogyun/tmpdir'
+os.environ['TEMP'] = '/hub_data4/dogyun/tmpdir'
+os.environ['TMP'] = '/hub_data4/dogyun/tmpdir'
+os.environ['TORCH_HOME'] = '/hub_data4/dogyun/tmpdir'
 import torch
 import pickle
 import argparse
@@ -559,7 +559,7 @@ def main():
             ref = dict(np.load(f))
         mu_ref = ref['mu']
         sigma_ref = ref['sigma']
-        
+
     if args.enc_type is not None:
         encoders, encoder_types, architectures = load_encoders(
             args.enc_type, device, 256
