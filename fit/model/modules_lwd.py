@@ -349,7 +349,7 @@ class FinalLayer(nn.Module):
         else:   # adaln_type in ['normal', 'lora']
             self.adaLN_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(hidden_size, 2 * hidden_size, bias=adaln_bias)
+                nn.Linear(hidden_size*2, 2 * hidden_size, bias=adaln_bias)
             )
         
     def forward(self, x, c):
