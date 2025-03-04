@@ -556,20 +556,6 @@ class FiTLwD(nn.Module):
         return: (B, p**2 * C_out, N), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
         """
 
-        # get RoPE frequences in advance, then calculate attention.
-        if self.online_rope:    
-            freqs_cos, freqs_sin = self.rel_pos_embed.online_get_2d_rope_from_grid(grid, size)
-            freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
-        else:
-            freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
-            freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
-
-        if self.number_of_representation_blocks > 1:
-            assert representation_noise is not None, "representation_noise must be provided when representation_blocks > 1"
-            representation_noise = self.representation_x_embedder(representation_noise)
-            for rep_block in self.representation_blocks:
-                representation_noise = rep_block(representation_noise, mask, freqs_cos, freqs_sin)
-
         assert cfg > 1, "cfg must be greater than 1"
         y_null = torch.tensor([self.num_classes] * x.shape[0], device=x.device)
         y = torch.cat([y, y_null], dim=0)
@@ -580,6 +566,21 @@ class FiTLwD(nn.Module):
         size = torch.cat([size, size], dim=0)
         grid = torch.cat([grid, grid], dim=0)
         mask = torch.cat([mask, mask], dim=0)
+
+        # get RoPE frequences in advance, then calculate attention.
+        if self.online_rope:    
+            freqs_cos, freqs_sin = self.rel_pos_embed.online_get_2d_rope_from_grid(grid, size)
+            freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
+        else:
+            freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
+            freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
+
+        if self.number_of_representation_blocks > 1:
+            assert representation_noise is not None, "representation_noise must be provided when representation_blocks > 1"
+            representation_noise = torch.cat([representation_noise, representation_noise], dim=0)
+            representation_noise = self.representation_x_embedder(representation_noise)
+            for rep_block in self.representation_blocks:
+                representation_noise = rep_block(representation_noise, mask, freqs_cos, freqs_sin)
         
         for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
             sigma_next = self.sigmas[i+1]
@@ -627,7 +628,7 @@ class FiTLwD(nn.Module):
                     x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
                 
                 if self.number_of_representation_blocks > 1:
-                    x += torch.cat([representation_noise, representation_noise], dim=0)
+                    x += representation_noise
 
                 if self.use_checkpoint:
                     if self.number_of_shared_blocks > 0:
