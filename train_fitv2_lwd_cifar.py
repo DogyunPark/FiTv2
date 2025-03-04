@@ -808,9 +808,9 @@ def main():
                 with accelerator.autocast():
                     _, _ = get_flexible_mask_and_ratio(model_kwargs, x_input)
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                        pred_model = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next, representation_noise=x0)
+                        pred_model, representation_noise = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next, representation_noise=x0)
                     else:
-                        pred_model = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next, representation_noise=x0)
+                        pred_model, representation_noise = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next, representation_noise=x0)
                     
                     # target = target.reshape(target.shape[0], -1, n_patch_h, 2, n_patch_w, 2)
                     # target = rearrange(target, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
