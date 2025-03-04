@@ -361,8 +361,8 @@ class FiTLwD(nn.Module):
                 else:
                     x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
 
-                if self.number_of_representation_blocks > 1:
-                    x += representation_noise
+                # if self.number_of_representation_blocks > 1:
+                #     x += representation_noise
                 
                 if self.use_checkpoint:
                     if self.number_of_shared_blocks > 0:
@@ -663,8 +663,8 @@ class FiTLwD(nn.Module):
                 else:
                     x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
                 
-                if self.number_of_representation_blocks > 1:
-                    x += representation_noise
+                # if self.number_of_representation_blocks > 1:
+                #     x += representation_noise
 
                 if self.use_checkpoint:
                     if self.number_of_shared_blocks > 0:
