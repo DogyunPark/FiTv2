@@ -664,8 +664,8 @@ def main():
             with accelerator.autocast():
                 raw_z = encoders[0].forward_features(raw_x)
                 if 'dinov2' in args.enc_type:
-                    raw_z = raw_z['x_norm_patchtokens']
                     raw_z_cls = raw_z['x_norm_clstoken']
+                    raw_z = raw_z['x_norm_patchtokens']
 
         for layer_idx in range(number_of_perflow):
             #layer_idx = torch.randint(0, number_of_perflow, (1,)).item()
