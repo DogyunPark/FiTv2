@@ -54,6 +54,7 @@ from elatentlpips import ELatentLPIPS
 from fit.scheduler.transport.utils import loss_func_huber
 from fit.utils.utils import bell_shaped_sample, symmetric_segment_division, linear_increase_division
 from fit.utils.evaluator import Evaluator
+from fit.utils.utils import preprocess_raw_image, load_encoders
 import tensorflow.compat.v1 as tf
 
 
@@ -227,7 +228,12 @@ def parse_args():
         default=5000,
         help="The number of samples to evaluate FID."
     )
-
+    parser.add_argument(
+        "--enc_type",
+        type=str,
+        default=None,
+        help="The type of encoder to use."
+    )
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -529,6 +535,11 @@ def main():
     torch.cuda.empty_cache()
     tf.reset_default_graph()
 
+    if args.enc_type is not None:
+        encoders, encoder_types, architectures = load_encoders(
+            args.enc_type, device, 256
+            )
+
     # Train!
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {train_len}")
@@ -608,7 +619,26 @@ def main():
         cfg_scale = torch.tensor([4.0])
         cfg_scale_cond = cfg_scale.expand(x.shape[0]).to(device=device)
 
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+            raw_x = model.module.unpatchify(x, (H, W))
+        else:
+            raw_x = model.unpatchify(x, (H, W))
+        with torch.no_grad():
+            raw_x = raw_x.to(torch.bfloat16)
+            raw_x = vae.decode(raw_x / vae.config.scaling_factor).sample
+            raw_x = (raw_x + 1)/2.
+            raw_x = preprocess_raw_image(raw_x, args.enc_type)
+            raw_x = raw_x.to(torch.float32)
+            with accelerator.autocast():
+                raw_z = encoders[0].forward_features(raw_x)
+                import pdb; pdb.set_trace()
+                if 'dinov2' in args.enc_type:
+                    raw_z = raw_z['x_norm_patchtokens']
+
         loss = 0.0
+        proj_loss = 0.0
+        x0 = torch.randn_like(x)
+
         for layer_idx in range(number_of_perflow):
         #layer_idx = torch.randint(0, number_of_perflow, (1,)).item()
 
@@ -631,7 +661,6 @@ def main():
             
             sigma_list = torch.linspace(sigma_current.item(), sigma_next.item(), perflow_solver_step+1)
 
-            x0 = torch.randn_like(x)
             ratio = sigma_current.clone()
             while len(ratio.shape) < x0.ndim:
                 ratio = ratio.unsqueeze(-1)
@@ -693,12 +722,20 @@ def main():
                 with accelerator.autocast():
                     _, _ = get_flexible_mask_and_ratio(model_kwargs, x)
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                        pred_model = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                        pred_model, representation_noise = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
                     else:
-                        pred_model = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                        pred_model, representation_noise = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
 
                 losses = mean_flat((((pred_model - target)) ** 2)) * weight
                 loss += losses.mean()
+
+                if args.enc_type is not None:
+                    proj_loss_per = 0.0
+                    for j, (repre_j, raw_z_j) in enumerate(zip(representation_noise, raw_z)):
+                        raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
+                        repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
+                        proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                    proj_loss += proj_loss_per / raw_z.shape[0]
 
                 if args.consistency_loss:
                     xt_plus = x0 * (1-ratio_next) + x * ratio_next
@@ -725,6 +762,8 @@ def main():
 
         # Backpropagate
         loss = loss / number_of_perflow
+        proj_loss = proj_loss / number_of_perflow
+        loss += 0.5 * proj_loss
         optimizer.zero_grad()
         accelerator.backward(loss)
         if accelerator.sync_gradients and accelerate_cfg.max_grad_norm > 0.:
@@ -736,6 +775,7 @@ def main():
         # Gather the losses across all processes for logging (if we use distributed training).
         avg_loss = accelerator.gather(loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
         train_loss += avg_loss.item() / grad_accu_steps
+        avg_proj_loss = accelerator.gather(proj_loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
 
         # Checks if the accelerator has performed an optimization step behind the scenes; Check gradient accumulation
         if accelerator.sync_gradients: 
@@ -748,6 +788,7 @@ def main():
             if getattr(accelerate_cfg, 'logger', 'wandb') != None:
                 accelerator.log({"train_loss": train_loss}, step=global_steps)
                 accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=global_steps)
+                accelerator.log({"proj_loss": proj_loss}, step=global_steps)
                 if accelerate_cfg.max_grad_norm != 0.0:
                     accelerator.log({"grad_norm": all_norm.item()}, step=global_steps)
             train_loss = 0.0

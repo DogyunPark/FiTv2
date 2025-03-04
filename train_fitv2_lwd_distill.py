@@ -624,8 +624,8 @@ def main():
 
         loss = 0.0
         proj_loss = 0.0
-        for_loop = 1
-        raw_x = model.unpatchify(x, (H, W))
+        for_loop = 3
+        raw_x = model.module.unpatchify(x, (H, W))
         with torch.no_grad():
             raw_x = raw_x.to(torch.bfloat16)
             raw_x = vae.decode(raw_x / vae.config.scaling_factor).sample

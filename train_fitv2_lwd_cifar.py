@@ -653,7 +653,6 @@ def main():
         loss = 0.0
         proj_loss = 0.0
         x0 = torch.randn_like(x)
-
         
         raw_x = model.module.unpatchify(x, (H, W))
         with torch.no_grad():

@@ -56,7 +56,7 @@ diffusion:
       patch_size: 2
       in_channels: 4
       hidden_size: 1152
-      depth: 24
+      depth: 60
       num_heads: 16
       mlp_ratio: 4.0
       class_dropout_prob: 0.1
@@ -65,7 +65,7 @@ diffusion:
       use_sit: true
       use_swiglu: true
       use_swiglu_large: false
-      use_checkpoint: false
+      use_checkpoint: true
       q_norm: layernorm
       k_norm: layernorm
       qk_norm_weight: false
@@ -73,12 +73,12 @@ diffusion:
       abs_pos_embed: null
       adaln_type: lora
       adaln_lora_dim: 288
-      number_of_perflow: 6
+      number_of_perflow: 12
       overlap: true
       fourier_basis: false
-      perlayer_embedder: true
+      perlayer_embedder: false
       number_of_shared_blocks: 0
-      number_of_representation_blocks: 2
+      number_of_representation_blocks: 3
 data:
   target: fit.data.in1k_latent_dataset.INLatentLoader
   params:
