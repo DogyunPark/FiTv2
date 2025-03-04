@@ -559,7 +559,11 @@ def main():
             ref = dict(np.load(f))
         mu_ref = ref['mu']
         sigma_ref = ref['sigma']
-    
+        
+    if args.enc_type is not None:
+        encoders, encoder_types, architectures = load_encoders(
+            args.enc_type, device, 256
+            )
     # Train!
     logger.info("***** Running training *****")
     #logger.info(f"  Num examples = {len(train_dataloader)}")
