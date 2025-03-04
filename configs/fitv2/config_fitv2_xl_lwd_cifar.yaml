@@ -80,9 +80,9 @@ diffusion:
       number_of_perflow: 6
       fourier_basis: false
       edm_sigmas: false
-      perlayer_embedder: true
-      overlap: true
-      number_of_shared_blocks: 0
+      perlayer_embedder: false
+      overlap: false
+      number_of_shared_blocks: 2
       number_of_representation_blocks: 2
       max_cached_len: 256
   gan_guidance_config:
