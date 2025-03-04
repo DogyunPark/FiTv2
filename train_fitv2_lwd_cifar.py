@@ -248,6 +248,12 @@ def parse_args():
         default=False,
         help="Whether to use double."
     )
+    parser.add_argument(
+        "--enc_type",
+        type=str,
+        default=None,
+        help="The type of encoder."
+    )
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
