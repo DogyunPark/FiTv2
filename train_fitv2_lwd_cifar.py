@@ -1,8 +1,8 @@
-import os
-os.environ['TMPDIR'] = '/hub_data2/dogyun/tmpdir'
-os.environ['TEMP'] = '/hub_data2/dogyun/tmpdir'
-os.environ['TMP'] = '/hub_data2/dogyun/tmpdir'
-os.environ['TORCH_HOME'] = '/hub_data2/dogyun/tmpdir'
+
+os.environ['TMPDIR'] = '/hub_data4/dogyun/tmpdir'
+os.environ['TEMP'] = '/hub_data4/dogyun/tmpdir'
+os.environ['TMP'] = '/hub_data4/dogyun/tmpdir'
+os.environ['TORCH_HOME'] = '/hub_data4/dogyun/tmpdir'
 import torch
 import pickle
 import argparse
@@ -653,7 +653,7 @@ def main():
         loss = 0.0
         proj_loss = 0.0
         x0 = torch.randn_like(x)
-        
+
         raw_x = model.module.unpatchify(x, (H, W))
         with torch.no_grad():
             #raw_x = raw_x.to(torch.bfloat16)
