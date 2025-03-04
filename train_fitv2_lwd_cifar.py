@@ -649,10 +649,11 @@ def main():
         proj_loss = 0.0
         x0 = torch.randn_like(x)
 
-        raw_x = model.unpatchify(x, (H, W))
+        
+        raw_x = model.module.unpatchify(x, (H, W))
         with torch.no_grad():
             raw_x = raw_x.to(torch.bfloat16)
-            raw_x = vae.decode(raw_x / vae.config.scaling_factor).sample
+            raw_x = vae.module.decode(raw_x / vae.config.scaling_factor).sample
             raw_x = (raw_x + 1)/2.
             raw_x = preprocess_raw_image(raw_x, args.enc_type)
             raw_x = raw_x.to(torch.float32)
