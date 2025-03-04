@@ -49,6 +49,7 @@ from fit.utils.lr_scheduler import get_scheduler
 from fit.model.fit_model import FiTBlock
 from fit.model.modules import FinalLayer, PatchEmbedder, TimestepEmbedder, LabelEmbedder
 from fit.scheduler.transport.utils import get_flexible_mask_and_ratio, mean_flat
+from fit.utils.utils import preprocess_raw_image, load_encoder
 
 from PIL import Image
 #from fit.scheduler.transport.utils import loss_func_huber
