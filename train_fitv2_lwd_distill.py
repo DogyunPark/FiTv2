@@ -814,7 +814,7 @@ def main():
                     t_test = torch.zeros_like(cfg_scale_cond_test)
 
                     with accelerator.autocast():
-                        output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, noise=noise_test_list, representation_noise=noise_test_list)
+                        output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, noise=noise_test_list, representation_noise=noise_test)
 
                     samples = output_test[..., : n_patch_h*n_patch_w]
                     if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):

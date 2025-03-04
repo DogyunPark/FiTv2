@@ -627,7 +627,7 @@ class FiTLwD(nn.Module):
                     x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
                 
                 if self.number_of_representation_blocks > 1:
-                    x += representation_noise
+                    x += torch.cat([representation_noise, representation_noise], dim=0)
 
                 if self.use_checkpoint:
                     if self.number_of_shared_blocks > 0:
