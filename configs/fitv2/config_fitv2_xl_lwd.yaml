@@ -78,7 +78,7 @@ diffusion:
       fourier_basis: false
       perlayer_embedder: true
       number_of_shared_blocks: 0
-      representation_blocks: 2
+      number_of_representation_blocks: 2
 data:
   target: fit.data.in1k_latent_dataset.INLatentLoader
   params:
