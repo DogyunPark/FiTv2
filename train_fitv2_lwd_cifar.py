@@ -664,8 +664,8 @@ def main():
             with accelerator.autocast():
                 raw_z = encoders[0].forward_features(raw_x)
                 if 'dinov2' in args.enc_type:
-                    #raw_z = raw_z['x_norm_patchtokens']
-                    raw_z = raw_z['x_norm_clstoken']
+                    raw_z = raw_z['x_norm_patchtokens']
+                    raw_z_cls = raw_z['x_norm_clstoken']
 
         for layer_idx in range(number_of_perflow):
             #layer_idx = torch.randint(0, number_of_perflow, (1,)).item()
@@ -808,9 +808,9 @@ def main():
                 with accelerator.autocast():
                     _, _ = get_flexible_mask_and_ratio(model_kwargs, x_input)
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                        pred_model, representation_noise = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next, representation_noise=x0)
+                        pred_model, representation_linear, representation_linear_cls = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next, representation_noise=x0)
                     else:
-                        pred_model, representation_noise = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next, representation_noise=x0)
+                        pred_model, representation_linear, representation_linear_cls = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next, representation_noise=x0)
                     
                     # target = target.reshape(target.shape[0], -1, n_patch_h, 2, n_patch_w, 2)
                     # target = rearrange(target, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
@@ -821,7 +821,12 @@ def main():
 
                 if args.enc_type is not None:
                     proj_loss_per = 0.0
-                    for j, (repre_j, raw_z_j) in enumerate(zip(representation_noise, raw_z)):
+                    for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z)):
+                        raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
+                        repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
+                        proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                    
+                    for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_cls, raw_z_cls)):
                         raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
                         repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
                         proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
