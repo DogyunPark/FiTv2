@@ -604,8 +604,8 @@ def main():
     train_loss = 0.0
 
     test_batch_size = 20
-    n_patch_h, n_patch_w = 32, 32
-    patch_size = 1
+    n_patch_h, n_patch_w = 16, 16
+    patch_size = 2
     H, W = n_patch_h * patch_size, n_patch_w * patch_size
     print('Generating images with resolution: ', H*8, 'x', W*8)
     y_test = torch.randint(0, 10, (test_batch_size,), device=device)
@@ -640,8 +640,20 @@ def main():
         cfg_scale_cond = cfg_scale.expand(x.shape[0]).to(device=device)
 
         loss = 0.0
-
+        proj_loss = 0.0
         x0 = torch.randn_like(x)
+
+        raw_x = model.unpatchify(x, (H, W))
+        with torch.no_grad():
+            raw_x = raw_x.to(torch.bfloat16)
+            raw_x = vae.decode(raw_x / vae.config.scaling_factor).sample
+            raw_x = (raw_x + 1)/2.
+            raw_x = preprocess_raw_image(raw_x, args.enc_type)
+            raw_x = raw_x.to(torch.float32)
+            with accelerator.autocast():
+                raw_z = encoders[0].forward_features(raw_x)
+                if 'dinov2' in args.enc_type:
+                    raw_z = raw_z['x_norm_patchtokens']
 
         for layer_idx in range(number_of_perflow):
             #layer_idx = torch.randint(0, number_of_perflow, (1,)).item()
@@ -795,6 +807,14 @@ def main():
                 losses = mean_flat(((pred_model - target)**2)) * weight
                 loss += losses.mean()
 
+                if args.enc_type is not None:
+                    proj_loss_per = 0.0
+                    for j, (repre_j, raw_z_j) in enumerate(zip(representation_noise, raw_z)):
+                        raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
+                        repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
+                        proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                    proj_loss += proj_loss_per / raw_z.shape[0]
+
                 if args.consistency_loss:
                     xt_plus = x0 * (1-ratio_next) + x * ratio_next
                     xt_current = x0 * (1-ratio) + x * ratio
@@ -830,6 +850,8 @@ def main():
 
         # Backpropagate
         loss = loss / (number_of_perflow)
+        proj_loss = proj_loss / number_of_perflow
+        loss += 0.5 * proj_loss
         optimizer.zero_grad()
         accelerator.backward(loss)
         if accelerator.sync_gradients and accelerate_cfg.max_grad_norm > 0.:
@@ -841,7 +863,7 @@ def main():
         # Gather the losses across all processes for logging (if we use distributed training).
         avg_loss = accelerator.gather(loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
         train_loss += avg_loss.item() / grad_accu_steps
-
+        avg_proj_loss = accelerator.gather(proj_loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
         # Checks if the accelerator has performed an optimization step behind the scenes; Check gradient accumulation
         if accelerator.sync_gradients: 
             if args.use_ema:
@@ -853,6 +875,7 @@ def main():
             if getattr(accelerate_cfg, 'logger', 'wandb') != None:
                 accelerator.log({"train_loss": train_loss}, step=global_steps)
                 accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=global_steps)
+                accelerator.log({"proj_loss": proj_loss}, step=global_steps)
                 if accelerate_cfg.max_grad_norm != 0.0:
                     accelerator.log({"grad_norm": all_norm.item()}, step=global_steps)
             train_loss = 0.0
