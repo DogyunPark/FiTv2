@@ -1,8 +1,8 @@
-import os
-os.environ['TMPDIR'] = '/hub_data4/dogyun/tmpdir'
-os.environ['TEMP'] = '/hub_data4/dogyun/tmpdir'
-os.environ['TMP'] = '/hub_data4/dogyun/tmpdir'
-os.environ['TORCH_HOME'] = '/hub_data4/dogyun/tmpdir'
+
+os.environ['TMPDIR'] = '/hub_data2/dogyun/tmpdir'
+os.environ['TEMP'] = '/hub_data2/dogyun/tmpdir'
+os.environ['TMP'] = '/hub_data2/dogyun/tmpdir'
+os.environ['TORCH_HOME'] = '/hub_data2/dogyun/tmpdir'
 import torch
 import pickle
 import argparse
