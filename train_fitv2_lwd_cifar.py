@@ -652,8 +652,8 @@ def main():
         
         raw_x = model.module.unpatchify(x, (H, W))
         with torch.no_grad():
-            raw_x = raw_x.to(torch.bfloat16)
-            raw_x = vae.module.decode(raw_x / vae.config.scaling_factor).sample
+            #raw_x = raw_x.to(torch.bfloat16)
+            #raw_x = vae.module.decode(raw_x / vae.config.scaling_factor).sample
             raw_x = (raw_x + 1)/2.
             raw_x = preprocess_raw_image(raw_x, args.enc_type)
             raw_x = raw_x.to(torch.float32)
