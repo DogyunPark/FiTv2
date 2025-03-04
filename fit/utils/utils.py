@@ -213,7 +213,8 @@ def load_encoders(enc_type, device, resolution=256):
 
 
 def preprocess_raw_image(x, enc_type):
-    resolution = x.shape[-1]
+    #resolution = x.shape[-1]
+    resolution = 256
     if 'clip' in enc_type:
         #x = x / 255.
         x = torch.nn.functional.interpolate(x, 224 * (resolution // 256), mode='bicubic')
