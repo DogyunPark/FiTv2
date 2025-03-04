@@ -98,7 +98,7 @@ class FiTLwD(nn.Module):
 
         if number_of_representation_blocks > 1:
             self.representation_x_embedder = PatchEmbedder(in_channels * patch_size**2, hidden_size, bias=True)
-            self.representation_blocks = nn.ModuleList([FiTBlock(
+            self.representation_blocks = nn.ModuleList([RepresentationBlock(
                 hidden_size, num_heads, mlp_ratio=mlp_ratio, swiglu=use_swiglu, swiglu_large=use_swiglu_large,
                 rel_pos_embed=rel_pos_embed, add_rel_pe_to_v=add_rel_pe_to_v, norm_layer=norm_type, 
                 q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight, qkv_bias=qkv_bias, ffn_bias=ffn_bias,

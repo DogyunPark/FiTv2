@@ -254,12 +254,12 @@ class FiTBlock(nn.Module):
         if adaln_type == 'normal':
             self.adaLN_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(hidden_size, 6 * hidden_size, bias=adaln_bias)
+                nn.Linear(hidden_size*2, 6 * hidden_size, bias=adaln_bias)
             )
         elif adaln_type == 'lora':
             self.adaLN_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(hidden_size*2, adaln_lora_dim, bias=adaln_bias),
+                nn.Linear(hidden_size, adaln_lora_dim, bias=adaln_bias),
                 nn.Linear(adaln_lora_dim, 6 * hidden_size, bias=adaln_bias)
             )
         elif adaln_type == 'swiglu':
@@ -291,6 +291,9 @@ class RepresentationBlock(nn.Module):
         qk_norm_weight: bool = False,
         qkv_bias=True,
         ffn_bias=True,
+        adaln_bias=True,
+        adaln_type='normal',
+        adaln_lora_dim: int = None,
         **block_kwargs
     ):
         super().__init__()
@@ -311,10 +314,26 @@ class RepresentationBlock(nn.Module):
                 self.mlp = SwiGLU(in_features=hidden_size, hidden_features=(mlp_hidden_dim*2)//3, bias=ffn_bias)
         else:
             self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=lambda: nn.GELU(approximate="tanh"), bias=ffn_bias)
+        if adaln_type == 'normal':
+            self.adaLN_modulation = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(hidden_size, 6 * hidden_size, bias=adaln_bias)
+            )
+        elif adaln_type == 'lora':
+            self.adaLN_modulation = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(hidden_size, adaln_lora_dim, bias=adaln_bias),
+                nn.Linear(adaln_lora_dim, 6 * hidden_size, bias=adaln_bias)
+            )
+        elif adaln_type == 'swiglu':
+            self.adaLN_modulation = SwiGLU(
+                in_features=hidden_size, hidden_features=(hidden_size//4)*3, out_features=6*hidden_size, bias=adaln_bias
+            )
 
-    def forward(self, x, mask, freqs_cos, freqs_sin):
-        x = x + self.attn(self.norm1(x), mask, freqs_cos, freqs_sin)
-        x = x + self.mlp(self.norm2(x))
+    def forward(self, x, c, mask, freqs_cos, freqs_sin, global_adaln=0.0):
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.adaLN_modulation(c) + global_adaln).chunk(6, dim=1)
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), mask, freqs_cos, freqs_sin)
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
 class FinalLayer(nn.Module):
