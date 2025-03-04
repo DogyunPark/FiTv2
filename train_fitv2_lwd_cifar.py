@@ -784,9 +784,9 @@ def main():
                 with accelerator.autocast():
                     _, _ = get_flexible_mask_and_ratio(model_kwargs, x_input)
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                        pred_model = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                        pred_model = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next, representation_noise=x0)
                     else:
-                        pred_model = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                        pred_model = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next, representation_noise=x0)
                     
                     # target = target.reshape(target.shape[0], -1, n_patch_h, 2, n_patch_w, 2)
                     # target = rearrange(target, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
@@ -923,7 +923,7 @@ def main():
                         t_test = torch.zeros_like(cfg_scale_cond_test)
 
                     with accelerator.autocast():
-                        output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, noise=noise_test_list)
+                        output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, noise=noise_test_list, representation_noise=noise_test)
 
                     samples = output_test[:, : n_patch_h*n_patch_w]
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
@@ -942,9 +942,9 @@ def main():
                     with accelerator.autocast():
                         #output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test)
                         if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list)
+                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list, representation_noise=noise_test)
                         else:
-                            output_test = ema_model.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list)
+                            output_test = ema_model.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list, representation_noise=noise_test)
 
                     samples = output_test[:, : n_patch_h*n_patch_w]
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
@@ -986,9 +986,9 @@ def main():
                         with accelerator.autocast():
                             #output_test = ema_model(latents, t_test, cfg_scale_cond_test, **model_kwargs_fid, number_of_step_perflow=2)
                             if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                                output_test = ema_model.module.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=2)
+                                output_test = ema_model.module.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=2, representation_noise=latents)
                             else:
-                                output_test = ema_model.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=2)
+                                output_test = ema_model.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=2, representation_noise=latents)
 
                         samples = output_test[:, : n_patch_h*n_patch_w]
                         if isinstance(model, torch.nn.parallel.DistributedDataParallel):

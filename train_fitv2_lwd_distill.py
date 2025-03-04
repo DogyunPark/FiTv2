@@ -388,7 +388,8 @@ def main():
     pretrained_model.eval()
 
     model = instantiate_from_config(diffusion_cfg.distillation_network_config).to(device=device)
-    #init_from_ckpt(model, checkpoint_dir=args.pretrain_ckpt2, ignore_keys=['y_embedder'], verbose=True)
+    if args.pretrain_ckpt2 is not None:
+        init_from_ckpt(model, checkpoint_dir=args.pretrain_ckpt2, verbose=True)
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     fixed_params = sum(p.numel() for p in model.parameters() if not p.requires_grad) 
@@ -588,7 +589,7 @@ def main():
     y_test = torch.randint(0, 1000, (test_batch_size,), device=device)
     print('Class: ', y_test)
     noise_test = torch.randn((test_batch_size, n_patch_h*n_patch_w, (2**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
-
+    noise_test_list = [torch.randn((test_batch_size, n_patch_h*n_patch_w, (2**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device) for _ in range(number_of_perflow)]
     for step, batch in enumerate(train_dataloader, start=global_steps):
         for batch_key in batch.keys():
             if not isinstance(batch[batch_key], list):
@@ -622,7 +623,7 @@ def main():
                 if layer_idx == 0:
                     sigma_current = sigmas[layer_idx]
                 else:
-                    sigma_current = sigmas[layer_idx] - 1/(number_of_perflow*2)
+                    sigma_current = sigmas[layer_idx] - 1/(number_of_perflow*5)
             else:
                 sigma_current = sigmas[layer_idx]
 
@@ -646,20 +647,23 @@ def main():
                     grid_cfg = torch.cat([grid, grid], dim=0)
                     mask_cfg = torch.cat([mask, mask], dim=0)
                     size_cfg = torch.cat([size, size], dim=0)
-                    model_kwargs_cfg = dict(y=y_cfg, grid=grid_cfg.long(), mask=mask_cfg, size=size_cfg)
+                    #model_kwargs_cfg = dict(y=y_cfg, grid=grid_cfg.long(), mask=mask_cfg, size=size_cfg)
+                    model_kwargs_cfg = dict(y=y, grid=grid.long(), mask=mask, size=size)
 
                     for i in range(solver_step):
                         #sigma_previous_i = sigma_list[i-1]
                         sigma_current_i = sigma_list[i]
                         sigma_next_i = sigma_list[i+1]
-                        t_cfg = sigma_current_i.repeat(x.shape[0]*2).to(device=device)
-                        x_input = torch.cat([xt, xt], dim=0)
+                        t_cfg = sigma_current_i.repeat(x.shape[0]).to(device=device)
+                        #x_input = torch.cat([xt, xt], dim=0)
+                        x_input = xt
                         #with accelerator.autocast():
                         model_output = pretrained_model(x_input, t_cfg, **model_kwargs_cfg)
 
                         C_cfg = 3 * 2 * 2
-                        noise_pred_cond, noise_pred_uncond = model_output.chunk(2, dim=0)
-                        noise_pred = noise_pred_uncond + cfg_scale.to(device=device) * (noise_pred_cond - noise_pred_uncond)
+                        #noise_pred_cond, noise_pred_uncond = model_output.chunk(2, dim=0)
+                        #noise_pred = noise_pred_uncond + cfg_scale.to(device=device) * (noise_pred_cond - noise_pred_uncond)
+                        noise_pred = model_output
                         xt = xt + (sigma_next_i - sigma_current_i) * noise_pred
 
             else:
@@ -670,7 +674,7 @@ def main():
 
             if args.reflow:
                 xt_input = x0 * (1-ratio) + x * ratio
-                per_flow_ratio = torch.randint(0, 1000, (x.shape[0],)) / 1000
+                per_flow_ratio = torch.randint(0, 50, (x.shape[0],)) / 50
                 #per_flow_ratio = torch.rand(x.shape[0]).to(device=device)
                 per_flow_ratio = per_flow_ratio.to(device=device)
                 t_input = sigma_current + per_flow_ratio.clone() * (sigma_next - sigma_current)
@@ -696,9 +700,9 @@ def main():
                 with accelerator.autocast():
                     _, _ = get_flexible_mask_and_ratio(model_kwargs, x)
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                        pred_model = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                        pred_model = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next, representation_noise=x0)
                     else:
-                        pred_model = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                        pred_model = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next, representation_noise=x0)
 
                 losses = mean_flat((((pred_model - target)) ** 2)) * weight
                 loss += losses.mean()
@@ -810,7 +814,7 @@ def main():
                     t_test = torch.zeros_like(cfg_scale_cond_test)
 
                     with accelerator.autocast():
-                        output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, noise=noise_test)
+                        output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, noise=noise_test_list, representation_noise=noise_test_list)
 
                     samples = output_test[..., : n_patch_h*n_patch_w]
                     if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
@@ -819,18 +823,20 @@ def main():
                         samples = ema_model.unpatchify(samples, (H, W))
                     samples = samples.to(torch.bfloat16)     
                     samples = vae.decode(samples / vae.config.scaling_factor).sample
-                    samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
+                    samples = samples.clamp(-1, 1)
+                    torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}.jpg"), normalize=True, scale_each=True)
+                    # samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
                     
-                    if accelerator.is_main_process:
-                        for i, img_tensor in enumerate(samples):
-                            img = Image.fromarray(img_tensor.cpu().numpy())
-                            img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-{i}.jpg"))
+                    # if accelerator.is_main_process:
+                    #     for i, img_tensor in enumerate(samples):
+                    #         img = Image.fromarray(img_tensor.cpu().numpy())
+                    #         img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-{i}.jpg"))
                     
                     with accelerator.autocast():
                         if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, noise=noise_test)
+                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 4, **model_kwargs_test, number_of_step_perflow=2, noise=noise_test_list, representation_noise=noise_test)
                         else:
-                            output_test = ema_model.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, noise=noise_test)
+                            output_test = ema_model.forward_cfg(noise_test, t_test, 4, **model_kwargs_test, number_of_step_perflow=2, noise=noise_test_list, representation_noise=noise_test)
 
                     samples = output_test[..., : n_patch_h*n_patch_w]
                     if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
@@ -839,12 +845,14 @@ def main():
                         samples = ema_model.unpatchify(samples, (H, W))
                     samples = samples.to(torch.bfloat16)     
                     samples = vae.decode(samples / vae.config.scaling_factor).sample
-                    samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
+                    samples = samples.clamp(-1, 1)
+                    torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_cfg_{global_steps}-.jpg"), normalize=True, scale_each=True)
+                    # samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
                     
-                    if accelerator.is_main_process:
-                        for i, img_tensor in enumerate(samples):
-                            img = Image.fromarray(img_tensor.cpu().numpy())
-                            img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_cfg_{global_steps}-{i}.jpg"))
+                    # if accelerator.is_main_process:
+                    #     for i, img_tensor in enumerate(samples):
+                    #         img = Image.fromarray(img_tensor.cpu().numpy())
+                    #         img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_cfg_{global_steps}-{i}.jpg"))
                     
             if args.eval_fid and global_steps % accelerate_cfg.eval_fid_steps == 0 and global_steps > 20000 and accelerator.is_main_process:
                 with torch.no_grad():
@@ -870,9 +878,9 @@ def main():
 
                         with accelerator.autocast():
                             if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                                samples = ema_model.module.forward_cfg(latents, t_test, 2, **model_kwargs_fid)
+                                samples = ema_model.module.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=2, representation_noise=latents)
                             else:
-                                samples = ema_model.forward_cfg(latents, t_test, 2, **model_kwargs_fid)
+                                samples = ema_model.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=2, representation_noise=latents)
 
                         samples = samples[:, : n_patch_h*n_patch_w]
                         if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):

@@ -273,6 +273,50 @@ class FiTBlock(nn.Module):
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
+class RepresentationBlock(nn.Module):
+    """
+    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
+    """
+    def __init__(self, 
+        hidden_size, 
+        num_heads, 
+        mlp_ratio=4.0, 
+        swiglu=True,
+        swiglu_large=False,
+        rel_pos_embed=None,
+        add_rel_pe_to_v=False,
+        norm_layer: str = 'layernorm',
+        q_norm: Optional[str] = None,
+        k_norm: Optional[str] = None,
+        qk_norm_weight: bool = False,
+        qkv_bias=True,
+        ffn_bias=True,
+        **block_kwargs
+    ):
+        super().__init__()
+        self.norm1 = create_norm(norm_layer, hidden_size)
+        self.norm2 = create_norm(norm_layer, hidden_size)
+        
+        self.attn = Attention(
+            hidden_size, num_heads=num_heads, rel_pos_embed=rel_pos_embed, 
+            q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight,
+            qkv_bias=qkv_bias, add_rel_pe_to_v=add_rel_pe_to_v, 
+            **block_kwargs
+        )
+        mlp_hidden_dim = int(hidden_size * mlp_ratio)
+        if swiglu:
+            if swiglu_large:
+                self.mlp = SwiGLU(in_features=hidden_size, hidden_features=mlp_hidden_dim, bias=ffn_bias)
+            else:
+                self.mlp = SwiGLU(in_features=hidden_size, hidden_features=(mlp_hidden_dim*2)//3, bias=ffn_bias)
+        else:
+            self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=lambda: nn.GELU(approximate="tanh"), bias=ffn_bias)
+
+    def forward(self, x, mask, freqs_cos, freqs_sin):
+        x = x + self.attn(self.norm1(x), mask, freqs_cos, freqs_sin)
+        x = x + self.mlp(self.norm2(x))
+        return x
+
 class FinalLayer(nn.Module):
     """
     The final layer of DiT.

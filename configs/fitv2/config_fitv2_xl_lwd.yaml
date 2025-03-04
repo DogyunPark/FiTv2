@@ -56,16 +56,16 @@ diffusion:
       patch_size: 2
       in_channels: 4
       hidden_size: 1152
-      depth: 80
+      depth: 24
       num_heads: 16
       mlp_ratio: 4.0
       class_dropout_prob: 0.1
       num_classes: 1000
       learn_sigma: false
       use_sit: true
-      use_swiglu: false
+      use_swiglu: true
       use_swiglu_large: false
-      use_checkpoint: true
+      use_checkpoint: false
       q_norm: layernorm
       k_norm: layernorm
       qk_norm_weight: false
@@ -73,11 +73,12 @@ diffusion:
       abs_pos_embed: null
       adaln_type: lora
       adaln_lora_dim: 288
-      number_of_perflow: 8
+      number_of_perflow: 6
       overlap: true
       fourier_basis: false
       perlayer_embedder: true
       number_of_shared_blocks: 0
+      representation_blocks: 2
 data:
   target: fit.data.in1k_latent_dataset.INLatentLoader
   params:
@@ -87,14 +88,14 @@ data:
       target_len: 256
       random: 'crop'
       loader:
-        batch_size: 24
+        batch_size: 16
         num_workers: 4
         shuffle: true
 
 
 accelerate:
   # others
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   mixed_precision: 'bf16'
   # training step config
   num_train_epochs: 
@@ -120,7 +121,7 @@ accelerate:
   checkpointing_epochs: False
   checkpointing_steps: 5000
   checkpointing_steps_list: [500, 200000, 400000, 1000000, 1400000, 1500000, 1800000]
-  checkpoints_total_limit: 4
+  checkpoints_total_limit: 2
   logging_steps: 1000
   evaluation_steps: 100
   eval_fid_steps: 5000
