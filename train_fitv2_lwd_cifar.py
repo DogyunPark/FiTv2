@@ -658,7 +658,10 @@ def main():
         proj_loss = 0.0
         x0 = torch.randn_like(x)
 
-        raw_x = model.module.unpatchify(x, (H, W))
+        if isinstance(model, torch.nn.DataParallel):
+            raw_x = model.module.unpatchify(x, (H, W))
+        else:
+            raw_x = model.unpatchify(x, (H, W))
         with torch.no_grad():
             #raw_x = raw_x.to(torch.bfloat16)
             #raw_x = vae.module.decode(raw_x / vae.config.scaling_factor).sample
@@ -842,7 +845,7 @@ def main():
                             raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
                             repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
                             proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
-                            
+
                         for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_cls, raw_z_cls)):
                             raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
                             repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
