@@ -200,7 +200,7 @@ def load_encoders(enc_type, device, resolution=256):
             kwargs = dict(img_size=[224, 224], patch_size=14)
             encoder = vit_huge(**kwargs).to(device)
             #with open(f"/hub_data4/dogyun/checkpoints/jepa/IN1K-vit.h.14-300e.pth.tar", "rb") as f:
-            state_dict = torch.load("/hub_data4/dogyun/checkpoints/jepa/IN1K-vit.h.14-300e.pth.tar", map_location=device)
+            state_dict = torch.load("/hub_data2/dogyun/checkpoints/jepa/IN1K-vit.h.14-300e.pth.tar", map_location=device)
             new_state_dict = dict()
             for key, value in state_dict['encoder'].items():
                 new_state_dict[key[7:]] = value

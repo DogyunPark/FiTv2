@@ -83,7 +83,7 @@ diffusion:
       perlayer_embedder: true
       overlap: false
       number_of_shared_blocks: 0
-      number_of_representation_blocks: 3
+      number_of_representation_blocks: 4
       max_cached_len: 256
   gan_guidance_config:
     sat: false

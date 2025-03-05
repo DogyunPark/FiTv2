@@ -565,9 +565,9 @@ def main():
             args.enc_type, device, 256
             )
         
-        encoders2, encoder_types2, architectures2 = load_encoders(
-            'jepa-vit-h', device, 256
-            )
+        # encoders2, encoder_types2, architectures2 = load_encoders(
+        #     'jepa-vit-h', device, 256
+        #     )
     # Train!
     logger.info("***** Running training *****")
     #logger.info(f"  Num examples = {len(train_dataloader)}")
@@ -830,7 +830,8 @@ def main():
 
                 if args.enc_type is not None:
                     proj_loss_per = 0.0
-                    if layer_idx < int(number_of_perflow/2):
+                    #if layer_idx < int(number_of_perflow/2):
+                    if 1:
                         for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z)):
                             raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
                             repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 

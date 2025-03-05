@@ -478,9 +478,9 @@ def main():
     )
 
     # Setup optimizer and lr_scheduler
-    if accelerator.is_main_process:
-        for name, param in model.named_parameters():
-            print(name, param.requires_grad)
+    # if accelerator.is_main_process:
+    #     for name, param in model.named_parameters():
+    #         print(name, param.requires_grad)
     if getattr(diffusion_cfg, 'pretrain_config', None) != None: # transfer to larger reolution     
         params = filter(lambda p: p.requires_grad, model.parameters())
     else:
@@ -539,7 +539,9 @@ def main():
         encoders, encoder_types, architectures = load_encoders(
             args.enc_type, device, 256
             )
-
+        # encoders2, encoder_types2, architectures2 = load_encoders(
+        #     'jepa-vit-h', device, 256
+        #     )
     # Train!
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {train_len}")
@@ -635,7 +637,7 @@ def main():
                 if 'dinov2' in args.enc_type:
                     raw_z_cls = raw_z['x_norm_clstoken']
                     raw_z = raw_z['x_norm_patchtokens']
-
+                #raw_z2 = encoders2[0].forward_features(raw_x)
         loss = 0.0
         proj_loss = 0.0
         x0 = torch.randn_like(x)
@@ -723,24 +725,44 @@ def main():
                 with accelerator.autocast():
                     _, _ = get_flexible_mask_and_ratio(model_kwargs, x)
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                        pred_model, representation_linear, representation_linear_cls = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                        pred_model, representation_linear, representation_linear_cls, representation_linear_jepa = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
                     else:
-                        pred_model, representation_linear, representation_linear_cls = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                        pred_model, representation_linear, representation_linear_cls, representation_linear_jepa = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
 
                 losses = mean_flat((((pred_model - target)) ** 2)) * weight
                 loss += losses.mean()
 
                 if args.enc_type is not None:
                     proj_loss_per = 0.0
-                    for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z)):
-                        raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
-                        repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
-                        proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
-                    
-                    for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_cls, raw_z_cls)):
-                        raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
-                        repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
-                        proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                    #if layer_idx <= int(number_of_perflow/2):
+                    if 1:
+                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z)):
+                            raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
+                            repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
+                            proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                        
+                        #proj_loss_per += 0.1 * mean_flat((representation_linear - raw_z)**2).sum()
+                        
+                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_cls, raw_z_cls)):
+                            raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
+                            repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
+                            proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                        
+                        #proj_loss_per += 0.1 * mean_flat((representation_linear_cls - raw_z_cls)**2).sum()
+                    else:
+                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_jepa, raw_z2)):
+                            raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
+                            repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
+                            proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+
+                        proj_loss_per += 0.1 * mean_flat((representation_linear_jepa - raw_z2)**2).sum()
+
+                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_cls, raw_z_cls)):
+                            raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
+                            repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
+                            proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                        
+                        proj_loss_per += 0.1 * mean_flat((representation_linear_cls - raw_z_cls)**2).sum()
                     proj_loss += proj_loss_per / raw_z.shape[0]
 
                 if args.consistency_loss:
@@ -861,9 +883,9 @@ def main():
                         samples = ema_model.module.unpatchify(samples, (H, W))
                     else:
                         samples = ema_model.unpatchify(samples, (H, W))
-                    samples = samples.clamp(-1, 1)
                     samples = samples.to(torch.bfloat16)     
                     samples = vae.decode(samples / vae.config.scaling_factor).sample
+                    samples = samples.clamp(-1, 1)
                     torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}.jpg"), normalize=True, scale_each=True)
                     # samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
                     
@@ -884,9 +906,9 @@ def main():
                         samples = ema_model.module.unpatchify(samples, (H, W))
                     else:
                         samples = ema_model.unpatchify(samples, (H, W))
-                    samples = samples.clamp(-1, 1)
                     samples = samples.to(torch.bfloat16)     
                     samples = vae.decode(samples / vae.config.scaling_factor).sample
+                    samples = samples.clamp(-1, 1)
                     torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-NFE10.jpg"), normalize=True, scale_each=True)
                     # samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
                     
@@ -895,7 +917,7 @@ def main():
                     #         img = Image.fromarray(img_tensor.cpu().numpy())
                     #         img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-{i}-NFE10.jpg"))
             
-            if args.eval_fid and global_steps % accelerate_cfg.eval_fid_steps == 0 and global_steps > 0 and accelerator.is_main_process:
+            if args.eval_fid and global_steps % accelerate_cfg.eval_fid_steps == 0 and global_steps > 0:
                 with torch.no_grad():
                     number = 0
                     arr_list = []
@@ -930,28 +952,30 @@ def main():
                             samples = ema_model.unpatchify(samples, (H, W))
                         samples = samples.to(torch.bfloat16)     
                         samples = vae.decode(samples / vae.config.scaling_factor).sample
+                        samples = samples.clamp(-1, 1)
                         samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
                         arr = samples.cpu().numpy()
                         arr_list.append(arr)
                         number += arr.shape[0]
                     
                     arr_list = np.concatenate(arr_list, axis=0)
-                    sample_acts, sample_stats, sample_stats_spatial = calculate_inception_stats_imagenet(arr_list, evaluator)
-                    inception_score = evaluator.compute_inception_score(sample_acts[0])
-                    fid = sample_stats.frechet_distance(ref_stats)
-                    sfid = sample_stats_spatial.frechet_distance(ref_stats_spatial)
-                    prec, recall = evaluator.compute_prec_recall(ref_acts[0], sample_acts[0])
-                    logger.info(f"Inception Score: {inception_score}")
-                    logger.info(f"FID: {fid}")
-                    logger.info(f"Spatial FID: {sfid}")
-                    logger.info(f"Precision: {prec}")
-                    logger.info(f"Recall: {recall}")
-                    if getattr(accelerate_cfg, 'logger', 'wandb') != None:
-                        accelerator.log({"inception_score": inception_score}, step=global_steps)
-                        accelerator.log({"fid": fid}, step=global_steps)
-                        accelerator.log({"sfid": sfid}, step=global_steps)
-                        accelerator.log({"prec": prec}, step=global_steps)
-                        accelerator.log({"recall": recall}, step=global_steps)
+                    if accelerator.is_main_process:
+                        sample_acts, sample_stats, sample_stats_spatial = calculate_inception_stats_imagenet(arr_list, evaluator)
+                        inception_score = evaluator.compute_inception_score(sample_acts[0])
+                        fid = sample_stats.frechet_distance(ref_stats)
+                        sfid = sample_stats_spatial.frechet_distance(ref_stats_spatial)
+                        prec, recall = evaluator.compute_prec_recall(ref_acts[0], sample_acts[0])
+                        logger.info(f"Inception Score: {inception_score}")
+                        logger.info(f"FID: {fid}")
+                        logger.info(f"Spatial FID: {sfid}")
+                        logger.info(f"Precision: {prec}")
+                        logger.info(f"Recall: {recall}")
+                        if getattr(accelerate_cfg, 'logger', 'wandb') != None:
+                            accelerator.log({"inception_score": inception_score}, step=global_steps)
+                            accelerator.log({"fid": fid}, step=global_steps)
+                            accelerator.log({"sfid": sfid}, step=global_steps)
+                            accelerator.log({"prec": prec}, step=global_steps)
+                            accelerator.log({"recall": recall}, step=global_steps)
             accelerator.wait_for_everyone()
 
         logs = {"step_loss": loss.detach().item(), 
