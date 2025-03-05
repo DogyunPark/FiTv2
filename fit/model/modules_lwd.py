@@ -254,12 +254,12 @@ class FiTBlock(nn.Module):
         if adaln_type == 'normal':
             self.adaLN_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(hidden_size*2, 6 * hidden_size, bias=adaln_bias)
+                nn.Linear(hidden_size, 6 * hidden_size, bias=adaln_bias)
             )
         elif adaln_type == 'lora':
             self.adaLN_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(hidden_size, adaln_lora_dim, bias=adaln_bias),
+                nn.Linear(hidden_size*2, adaln_lora_dim, bias=adaln_bias),
                 nn.Linear(adaln_lora_dim, 6 * hidden_size, bias=adaln_bias)
             )
         elif adaln_type == 'swiglu':

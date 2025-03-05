@@ -564,6 +564,10 @@ def main():
         encoders, encoder_types, architectures = load_encoders(
             args.enc_type, device, 256
             )
+        
+        encoders2, encoder_types2, architectures2 = load_encoders(
+            'jepa-vit-h', device, 256
+            )
     # Train!
     logger.info("***** Running training *****")
     #logger.info(f"  Num examples = {len(train_dataloader)}")
@@ -666,6 +670,8 @@ def main():
                 if 'dinov2' in args.enc_type:
                     raw_z_cls = raw_z['x_norm_clstoken']
                     raw_z = raw_z['x_norm_patchtokens']
+                
+                raw_z2 = encoders2[0].forward_features(raw_x)
 
         for layer_idx in range(number_of_perflow):
             #layer_idx = torch.randint(0, number_of_perflow, (1,)).item()
@@ -821,15 +827,26 @@ def main():
 
                 if args.enc_type is not None:
                     proj_loss_per = 0.0
-                    for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z)):
-                        raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
-                        repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
-                        proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
-                    
-                    for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_cls, raw_z_cls)):
-                        raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
-                        repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
-                        proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                    if layer_idx < int(number_of_perflow/2):
+                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z)):
+                            raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
+                            repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
+                            proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                        
+                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_cls, raw_z_cls)):
+                            raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
+                            repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
+                            proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                    else:
+                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z2)):
+                            raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
+                            repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
+                            proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                            
+                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_cls, raw_z_cls)):
+                            raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
+                            repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
+                            proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
                     proj_loss += proj_loss_per / raw_z.shape[0]
 
                 if args.consistency_loss:

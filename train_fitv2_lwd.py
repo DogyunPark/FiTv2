@@ -631,8 +631,9 @@ def main():
             raw_x = raw_x.to(torch.float32)
             with accelerator.autocast():
                 raw_z = encoders[0].forward_features(raw_x)
-                import pdb; pdb.set_trace()
+                #import pdb; pdb.set_trace()
                 if 'dinov2' in args.enc_type:
+                    raw_z_cls = raw_z['x_norm_clstoken']
                     raw_z = raw_z['x_norm_patchtokens']
 
         loss = 0.0
@@ -722,16 +723,21 @@ def main():
                 with accelerator.autocast():
                     _, _ = get_flexible_mask_and_ratio(model_kwargs, x)
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                        pred_model, representation_noise = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                        pred_model, representation_linear, representation_linear_cls = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
                     else:
-                        pred_model, representation_noise = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                        pred_model, representation_linear, representation_linear_cls = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
 
                 losses = mean_flat((((pred_model - target)) ** 2)) * weight
                 loss += losses.mean()
 
                 if args.enc_type is not None:
                     proj_loss_per = 0.0
-                    for j, (repre_j, raw_z_j) in enumerate(zip(representation_noise, raw_z)):
+                    for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z)):
+                        raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
+                        repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
+                        proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                    
+                    for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_cls, raw_z_cls)):
                         raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
                         repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
                         proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
@@ -827,7 +833,7 @@ def main():
                 logger.info(f"Saved state to {save_path}")
                 accelerator.wait_for_everyone()
             
-            if global_steps % accelerate_cfg.evaluation_steps == 0:
+            if global_steps % accelerate_cfg.evaluation_steps == 0 and accelerator.is_main_process:
                 ema_model.eval()
                 with torch.no_grad():
                     # prepare for x
@@ -855,6 +861,7 @@ def main():
                         samples = ema_model.module.unpatchify(samples, (H, W))
                     else:
                         samples = ema_model.unpatchify(samples, (H, W))
+                    samples = samples.clamp(-1, 1)
                     samples = samples.to(torch.bfloat16)     
                     samples = vae.decode(samples / vae.config.scaling_factor).sample
                     torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}.jpg"), normalize=True, scale_each=True)
@@ -877,6 +884,7 @@ def main():
                         samples = ema_model.module.unpatchify(samples, (H, W))
                     else:
                         samples = ema_model.unpatchify(samples, (H, W))
+                    samples = samples.clamp(-1, 1)
                     samples = samples.to(torch.bfloat16)     
                     samples = vae.decode(samples / vae.config.scaling_factor).sample
                     torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-NFE10.jpg"), normalize=True, scale_each=True)

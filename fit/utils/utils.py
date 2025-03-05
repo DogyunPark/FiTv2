@@ -183,7 +183,7 @@ def load_encoders(enc_type, device, resolution=256):
             import timm
             kwargs = dict(img_size=256)
             encoder = vit_large_patch16(**kwargs).to(device)
-            with open(f"ckpts/mae_vit{model_config}.pth", "rb") as f:
+            with open(f"/hub_data4/dogyun/checkpoints/mae_vit{model_config}.pth", "rb") as f:
                 state_dict = torch.load(f)
             if 'pos_embed' in state_dict["model"].keys():
                 state_dict["model"]['pos_embed'] = timm.layers.pos_embed.resample_abs_pos_embed(
@@ -199,7 +199,7 @@ def load_encoders(enc_type, device, resolution=256):
             from models.jepa import vit_huge
             kwargs = dict(img_size=[224, 224], patch_size=14)
             encoder = vit_huge(**kwargs).to(device)
-            with open(f"ckpts/ijepa_vit{model_config}.pth", "rb") as f:
+            with open(f"/hub_data4/dogyun/checkpoints/jepa/ijepa_vit{model_config}.pth", "rb") as f:
                 state_dict = torch.load(f, map_location=device)
             new_state_dict = dict()
             for key, value in state_dict['encoder'].items():
