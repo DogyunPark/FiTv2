@@ -817,9 +817,9 @@ def main():
                 with accelerator.autocast():
                     _, _ = get_flexible_mask_and_ratio(model_kwargs, x_input)
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                        pred_model, representation_linear, representation_linear_cls = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next, representation_noise=x0)
+                        pred_model, representation_linear, representation_linear_cls, representation_linear_jepa = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next, representation_noise=x0)
                     else:
-                        pred_model, representation_linear, representation_linear_cls = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next, representation_noise=x0)
+                        pred_model, representation_linear, representation_linear_cls, representation_linear_jepa = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next, representation_noise=x0)
                     
                     # target = target.reshape(target.shape[0], -1, n_patch_h, 2, n_patch_w, 2)
                     # target = rearrange(target, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
@@ -841,7 +841,7 @@ def main():
                             repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
                             proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
                     else:
-                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z2)):
+                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_jepa, raw_z2)):
                             raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
                             repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
                             proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))

@@ -118,6 +118,13 @@ class FiTLwD(nn.Module):
                     nn.SiLU(),
                     nn.Linear(2048, 1024),
                 )
+            self.linear_projection_jepa = nn.Sequential(
+                    nn.Linear(hidden_size, 2048),
+                    nn.SiLU(),
+                    nn.Linear(2048, 2048),
+                    nn.SiLU(),
+                    nn.Linear(2048, 1280),
+                )
 
         if number_of_shared_blocks > 0:
             self.start_shared_blocks = nn.ModuleList([FiTBlock(
@@ -453,6 +460,7 @@ class FiTLwD(nn.Module):
             
             #if 1:
             representation_linear = self.linear_projection(representation_noise)
+            representation_linear_jepa = self.linear_projection_jepa(representation_noise)
             representation_noise_mean = torch.mean(representation_noise, dim=1)
             representation_linear_cls = self.linear_projection_cls(representation_noise_mean)
             drop_ids = torch.rand(x.shape[0], device=x.device) < 0.1
@@ -503,7 +511,7 @@ class FiTLwD(nn.Module):
             x = rearrange(x, 'B N C -> B C N')
         
         if self.number_of_representation_blocks > 1:
-            return x, representation_linear, representation_linear_cls
+            return x, representation_linear, representation_linear_cls, representation_linear_jepa
         else:
             return x
     
