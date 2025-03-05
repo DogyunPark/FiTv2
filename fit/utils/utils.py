@@ -196,7 +196,7 @@ def load_encoders(enc_type, device, resolution=256):
             )
 
         elif encoder_type == 'jepa':
-            from models.jepa import vit_huge
+            from fit.encoders.jepa import vit_huge
             kwargs = dict(img_size=[224, 224], patch_size=14)
             encoder = vit_huge(**kwargs).to(device)
             with open(f"/hub_data4/dogyun/checkpoints/jepa/ijepa_vit{model_config}.pth", "rb") as f:
