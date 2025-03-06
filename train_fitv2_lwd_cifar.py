@@ -910,7 +910,8 @@ def main():
         # Gather the losses across all processes for logging (if we use distributed training).
         avg_loss = accelerator.gather(loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
         train_loss += avg_loss.item() / grad_accu_steps
-        avg_proj_loss = accelerator.gather(proj_loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
+        if args.enc_type is not None:
+            avg_proj_loss = accelerator.gather(proj_loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
         # Checks if the accelerator has performed an optimization step behind the scenes; Check gradient accumulation
         if accelerator.sync_gradients: 
             if args.use_ema:
@@ -922,7 +923,8 @@ def main():
             if getattr(accelerate_cfg, 'logger', 'wandb') != None:
                 accelerator.log({"train_loss": train_loss}, step=global_steps)
                 accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=global_steps)
-                accelerator.log({"proj_loss": proj_loss}, step=global_steps)
+                if args.enc_type is not None:
+                    accelerator.log({"proj_loss": proj_loss}, step=global_steps)
                 if accelerate_cfg.max_grad_norm != 0.0:
                     accelerator.log({"grad_norm": all_norm.item()}, step=global_steps)
             train_loss = 0.0
