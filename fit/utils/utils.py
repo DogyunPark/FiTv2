@@ -235,3 +235,13 @@ def preprocess_raw_image(x, enc_type):
         x = torch.nn.functional.interpolate(x, 224 * (resolution // 256), mode='bicubic')
 
     return x
+
+
+@torch.no_grad()
+def sample_posterior(moments, latents_scale=1.):
+    device = moments.device
+    
+    mean, std = torch.chunk(moments, 2, dim=1)
+    z = mean + std * torch.randn_like(mean)
+    z = (z * latents_scale) 
+    return z 

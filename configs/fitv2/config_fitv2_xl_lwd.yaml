@@ -84,7 +84,8 @@ data:
   params:
     train:
       #data_path: datasets/imagenet1k_latents_256_sd_vae_ft_ema_one_sample
-      data_path: datasets/imagenet1k_latents_256_sd_vae_ft_ema
+      #data_path: datasets/imagenet1k_latents_256_sd_vae_ft_ema
+      data_path: datasets2/imagenet_256/
       target_len: 256
       random: 'crop'
       loader:

@@ -52,9 +52,11 @@ from came_pytorch import CAME
 from PIL import Image
 from elatentlpips import ELatentLPIPS
 from fit.scheduler.transport.utils import loss_func_huber
-from fit.utils.utils import bell_shaped_sample, symmetric_segment_division, linear_increase_division
+from fit.utils.utils import bell_shaped_sample, symmetric_segment_division, linear_increase_division, sample_posterior
 from fit.utils.evaluator import Evaluator
 from fit.utils.utils import preprocess_raw_image, load_encoders
+from fit.data.dataset import CustomDataset
+from fit.data.in1k_latent_dataset import get_train_sampler
 import tensorflow.compat.v1 as tf
 
 
@@ -470,12 +472,15 @@ def main():
             global_steps = int(resume_from_path.split("-")[1]) # gs not calculate the gradient_accumulation_steps
             logger.info(f"Resuming from steps: {global_steps}")
 
-    get_train_dataloader = instantiate_from_config(data_cfg)
-    train_len = get_train_dataloader.train_len()
-    train_dataloader = get_train_dataloader.train_dataloader(
-        global_batch_size=total_batch_size, max_steps=accelerate_cfg.max_train_steps, 
-        resume_step=global_steps, seed=args.seed
-    )
+    # get_train_dataloader = instantiate_from_config(data_cfg)
+    # train_len = get_train_dataloader.train_len()
+    # train_dataloader = get_train_dataloader.train_dataloader(
+    #     global_batch_size=total_batch_size, max_steps=accelerate_cfg.max_train_steps, 
+    #     resume_step=global_steps, seed=args.seed
+    # )
+    train_dataset = CustomDataset(data_cfg.params.train.data_path)
+    train_sampler = get_train_sampler(train_dataset, total_batch_size, accelerate_cfg.max_train_steps, global_steps, args.seed)
+    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=data_cfg.params.train.loader.batch_size, sampler=train_sampler, num_workers=data_cfg.params.train.loader.num_workers, pin_memory=True, drop_last=True)
 
     # Setup optimizer and lr_scheduler
     # if accelerator.is_main_process:
@@ -544,14 +549,14 @@ def main():
         #     )
     # Train!
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {train_len}")
+    #logger.info(f"  Num examples = {train_len}")
     logger.info(f"  Instantaneous batch size per device = {data_cfg.params.train.loader.batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Learning rate = {learning_rate}")
     logger.info(f"  Gradient Accumulation steps = {grad_accu_steps}")
     logger.info(f"  Total optimization steps = {accelerate_cfg.max_train_steps}")
     logger.info(f"  Current optimization steps = {global_steps}")
-    logger.info(f"  Train dataloader length = {len(train_dataloader)} ")
+    #logger.info(f"  Train dataloader length = {len(train_dataloader)} ")
     logger.info(f"  Training Mixed-Precision = {accelerate_cfg.mixed_precision}")
 
     # Potentially load in the weights and states from a previous save
@@ -571,7 +576,7 @@ def main():
                 if accelerator.is_local_main_process:
                     logger.warning(err)
                     logger.warning(f"Failed to resume from checkpoint {resume_from_path}")
-                    shutil.rmtree(os.path.join(ckptdir, resume_from_path))
+                    #shutil.rmtree(os.path.join(ckptdir, resume_from_path))
                 else:
                     time.sleep(2)
     
@@ -595,50 +600,72 @@ def main():
 
     test_batch_size = 4
     n_patch_h, n_patch_w = 16, 16
+    patch_size = 2
     H, W = n_patch_h * 2, n_patch_w * 2
     print('Generating images with resolution: ', H*8, 'x', W*8)
     y_test = torch.randint(0, 1000, (test_batch_size,), device=device)
     print('Classes: ', y_test)
     noise_test = torch.randn((test_batch_size, n_patch_h*n_patch_w, (2**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
     noise_test_list = [torch.randn((test_batch_size, n_patch_h*n_patch_w, (2**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device) for _ in range(number_of_perflow-1)]
-
     for step, batch in enumerate(train_dataloader, start=global_steps):
-        for batch_key in batch.keys():
-            if not isinstance(batch[batch_key], list):
-                batch[batch_key] = batch[batch_key].to(device=device)
-        x = batch['feature']        # (B, N, C)
-        grid = batch['grid']        # (B, 2, N)
-        mask = batch['mask']        # (B, N)
-        y = batch['label']          # (B, 1)
-        size = batch['size']        # (B, N_pack, 2), order: h, w. When pack is not used, N_pack=1.
+        # for batch_key in batch.keys():
+        #     if not isinstance(batch[batch_key], list):
+        #         batch[batch_key] = batch[batch_key].to(device=device)
+        # x = batch['feature']        # (B, N, C)
+        # grid = batch['grid']        # (B, 2, N)
+        # mask = batch['mask']        # (B, N)
+        # y = batch['label']          # (B, 1)
+        # size = batch['size']        # (B, N_pack, 2), order: h, w. When pack is not used, N_pack=1.
+
+        raw_x, x, y = batch
+        raw_x = raw_x.to(device)
+        x = x.to(device)
+        y = y.to(device)
+        x = sample_posterior(x, vae.config.scaling_factor)
+        x = x.reshape(x.shape[0], -1, n_patch_h, patch_size, n_patch_w, patch_size)
+        x = rearrange(x, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+        x = x.permute(0, 2, 1)
+
+        grid_h = torch.arange(n_patch_h, dtype=torch.long)
+        grid_w = torch.arange(n_patch_w, dtype=torch.long)
+        grid = torch.meshgrid(grid_w, grid_h, indexing='xy')
+        grid = torch.cat(
+            [grid[0].reshape(1,-1), grid[1].reshape(1,-1)], dim=0
+        ).repeat(x.shape[0],1,1).to(device=device, dtype=torch.long)
+        mask = torch.ones(x.shape[0], n_patch_h*n_patch_w).to(device=device, dtype=torch.bfloat16)
+        size = torch.tensor((n_patch_h, n_patch_w)).repeat(x.shape[0],1).to(device=device, dtype=torch.long)
+        size = size[:, None, :]
 
         N_batch = int(torch.max(torch.sum(size[..., 0] * size[..., 1], dim=-1)))
         x, grid, mask = x[:, : N_batch], grid[..., : N_batch], mask[:, : N_batch]
         
         # prepare other parameters
-        y = y.squeeze(dim=-1).to(torch.int)
+        #y = y.squeeze(dim=-1).to(torch.int)
+        y = y.to(torch.int)
 
         #cfg_scale = torch.randint(1, 5, (1,))
         cfg_scale = torch.tensor([4.0])
         cfg_scale_cond = cfg_scale.expand(x.shape[0]).to(device=device)
 
-        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-            raw_x = model.module.unpatchify(x, (H, W))
-        else:
-            raw_x = model.unpatchify(x, (H, W))
+        # if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+        #     raw_x = model.module.unpatchify(x, (H, W))
+        # else:
+        #     raw_x = model.unpatchify(x, (H, W))
+        # with torch.no_grad():
+        #     raw_x = raw_x.to(torch.bfloat16)
+        #     raw_x = vae.decode(raw_x / vae.config.scaling_factor).sample
+        #     raw_x = (raw_x + 1)/2.
+        #     raw_x = preprocess_raw_image(raw_x, args.enc_type)
+        #     raw_x = raw_x.to(torch.float32)
         with torch.no_grad():
-            raw_x = raw_x.to(torch.bfloat16)
-            raw_x = vae.decode(raw_x / vae.config.scaling_factor).sample
-            raw_x = (raw_x + 1)/2.
+            raw_x = raw_x / 255.
             raw_x = preprocess_raw_image(raw_x, args.enc_type)
-            raw_x = raw_x.to(torch.float32)
-            with accelerator.autocast():
-                raw_z = encoders[0].forward_features(raw_x)
-                #import pdb; pdb.set_trace()
-                if 'dinov2' in args.enc_type:
-                    raw_z_cls = raw_z['x_norm_clstoken']
-                    raw_z = raw_z['x_norm_patchtokens']
-                #raw_z2 = encoders2[0].forward_features(raw_x)
+            raw_z = encoders[0].forward_features(raw_x)
+            #import pdb; pdb.set_trace()
+            if 'dinov2' in args.enc_type:
+                raw_z_cls = raw_z['x_norm_clstoken']
+                raw_z = raw_z['x_norm_patchtokens']
+            #raw_z2 = encoders2[0].forward_features(raw_x)
         loss = 0.0
         proj_loss = 0.0
         x0 = torch.randn_like(x)
@@ -756,14 +783,14 @@ def main():
                             repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
                             proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
 
-                        proj_loss_per += 0.1 * mean_flat((representation_linear_jepa - raw_z2)**2).sum()
+                        #proj_loss_per += 0.1 * mean_flat((representation_linear_jepa - raw_z2)**2).sum()
 
                         for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_cls, raw_z_cls)):
                             raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
                             repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
                             proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
                         
-                        proj_loss_per += 0.1 * mean_flat((representation_linear_cls - raw_z_cls)**2).sum()
+                        #proj_loss_per += 0.1 * mean_flat((representation_linear_cls - raw_z_cls)**2).sum()
                     proj_loss += proj_loss_per / raw_z.shape[0]
 
                 if args.consistency_loss:

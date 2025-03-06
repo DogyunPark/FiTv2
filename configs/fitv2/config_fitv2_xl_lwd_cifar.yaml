@@ -75,7 +75,7 @@ diffusion:
       qk_norm_weight: false
       rel_pos_embed: rope
       abs_pos_embed: null
-      adaln_type: lora
+      adaln_type: normal
       adaln_lora_dim: 288
       number_of_perflow: 1
       fourier_basis: false
@@ -83,7 +83,7 @@ diffusion:
       perlayer_embedder: false
       overlap: false
       number_of_shared_blocks: 0
-      number_of_representation_blocks: 0
+      number_of_representation_blocks: 4
       max_cached_len: 256
   gan_guidance_config:
     sat: false
