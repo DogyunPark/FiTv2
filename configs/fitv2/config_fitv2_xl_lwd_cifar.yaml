@@ -75,7 +75,7 @@ diffusion:
       qk_norm_weight: false
       rel_pos_embed: rope
       abs_pos_embed: null
-      adaln_type: normal
+      adaln_type: lora
       adaln_lora_dim: 288
       number_of_perflow: 1
       fourier_basis: false
