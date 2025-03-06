@@ -513,7 +513,7 @@ class FiTLwD(nn.Module):
         if self.number_of_representation_blocks > 1:
             return x, representation_linear, representation_linear_cls, representation_linear_cls
         else:
-            return x
+            return x, None, None, None
     
     def forward_run_layer_from_target_layer(self, x, t_input, cfg, y, grid, mask, size=None, 
             target_start_idx=None, target_end_idx=None, number_of_step_perflow=1, return_all_layers=False, noise=None):
