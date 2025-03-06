@@ -259,7 +259,7 @@ class FiTBlock(nn.Module):
         elif adaln_type == 'lora':
             self.adaLN_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(hidden_size*2, adaln_lora_dim, bias=adaln_bias),
+                nn.Linear(hidden_size, adaln_lora_dim, bias=adaln_bias),
                 nn.Linear(adaln_lora_dim, 6 * hidden_size, bias=adaln_bias)
             )
         elif adaln_type == 'swiglu':
@@ -349,7 +349,7 @@ class FinalLayer(nn.Module):
         else:   # adaln_type in ['normal', 'lora']
             self.adaLN_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(hidden_size*2, 2 * hidden_size, bias=adaln_bias)
+                nn.Linear(hidden_size, 2 * hidden_size, bias=adaln_bias)
             )
         
     def forward(self, x, c):
