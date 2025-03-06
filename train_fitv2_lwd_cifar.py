@@ -659,7 +659,7 @@ def main():
         x0 = torch.randn_like(x)
 
         if args.enc_type is not None:
-            if isinstance(model, torch.nn.DataParallel):
+            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
                 raw_x = model.module.unpatchify(x, (H, W))
             else:
                 raw_x = model.unpatchify(x, (H, W))
