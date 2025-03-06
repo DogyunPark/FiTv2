@@ -59,7 +59,7 @@ diffusion:
       context_size: 256
       patch_size: 2
       in_channels: 3
-      hidden_size: 768
+      hidden_size: 384
       depth: 30
       num_heads: 6
       mlp_ratio: 4.0
@@ -77,10 +77,10 @@ diffusion:
       abs_pos_embed: null
       adaln_type: normal
       adaln_lora_dim: 288
-      number_of_perflow: 1
+      number_of_perflow: 6
       fourier_basis: false
       edm_sigmas: false
-      perlayer_embedder: false
+      perlayer_embedder: true
       overlap: false
       number_of_shared_blocks: 0
       number_of_representation_blocks: 4

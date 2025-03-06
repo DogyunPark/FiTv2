@@ -1,8 +1,8 @@
 import os
-os.environ['TMPDIR'] = '/hub_data2/dogyun/tmpdir'
-os.environ['TEMP'] = '/hub_data2/dogyun/tmpdir'
-os.environ['TMP'] = '/hub_data2/dogyun/tmpdir'
-os.environ['TORCH_HOME'] = '/hub_data2/dogyun/tmpdir'
+os.environ['TMPDIR'] = '/hub_data4/dogyun/tmpdir'
+os.environ['TEMP'] = '/hub_data4/dogyun/tmpdir'
+os.environ['TMP'] = '/hub_data4/dogyun/tmpdir'
+os.environ['TORCH_HOME'] = '/hub_data4/dogyun/tmpdir'
 import torch
 import pickle
 import argparse
@@ -833,10 +833,10 @@ def main():
                     proj_loss_per = 0.0
                     #if layer_idx < int(number_of_perflow/2):
                     if 1:
-                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z)):
-                            raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
-                            repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
-                            proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                        # for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z)):
+                        #     raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
+                        #     repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
+                        #     proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
                         
                         #proj_loss_per += 0.1 * mean_flat((representation_linear - raw_z)**2).sum()
                         
@@ -845,7 +845,7 @@ def main():
                             repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
                             proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
                         
-                        #proj_loss_per += 0.1 * mean_flat((representation_linear_cls - raw_z_cls)**2).sum()
+                        proj_loss_per += mean_flat((representation_linear_cls - raw_z_cls)**2).sum()
                     else:
                         for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_jepa, raw_z2)):
                             raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
@@ -1078,8 +1078,10 @@ def main():
                     fid = compute_fid(mu, sigma, ref_mu=mu_ref, ref_sigma=sigma_ref)
                     logger.info(f"FID: {fid}")
                     if getattr(accelerate_cfg, 'logger', 'wandb') != None:
-                        accelerator.log({"fid": fid}, step=global_steps)    
+                        accelerator.log({"fid": fid}, step=global_steps)
             accelerator.wait_for_everyone()
+        
+        torch.cuda.empty_cache()
 
         logs = {"step_loss": loss.detach().item(), 
                 "lr": lr_scheduler.get_last_lr()[0]}
