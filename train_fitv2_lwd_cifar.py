@@ -1,8 +1,8 @@
 import os
-os.environ['TMPDIR'] = '/hub_data4/dogyun/tmpdir'
-os.environ['TEMP'] = '/hub_data4/dogyun/tmpdir'
-os.environ['TMP'] = '/hub_data4/dogyun/tmpdir'
-os.environ['TORCH_HOME'] = '/hub_data4/dogyun/tmpdir'
+os.environ['TMPDIR'] = '/hub_data2/dogyun/tmpdir'
+os.environ['TEMP'] = '/hub_data2/dogyun/tmpdir'
+os.environ['TMP'] = '/hub_data2/dogyun/tmpdir'
+os.environ['TORCH_HOME'] = '/hub_data2/dogyun/tmpdir'
 import torch
 import pickle
 import argparse
@@ -658,21 +658,22 @@ def main():
         proj_loss = 0.0
         x0 = torch.randn_like(x)
 
-        if isinstance(model, torch.nn.DataParallel):
-            raw_x = model.module.unpatchify(x, (H, W))
-        else:
-            raw_x = model.unpatchify(x, (H, W))
-        with torch.no_grad():
-            #raw_x = raw_x.to(torch.bfloat16)
-            #raw_x = vae.module.decode(raw_x / vae.config.scaling_factor).sample
-            raw_x = (raw_x + 1)/2.
-            raw_x = preprocess_raw_image(raw_x, args.enc_type)
-            raw_x = raw_x.to(torch.float32)
-            with accelerator.autocast():
-                raw_z = encoders[0].forward_features(raw_x)
-                if 'dinov2' in args.enc_type:
-                    raw_z_cls = raw_z['x_norm_clstoken']
-                    raw_z = raw_z['x_norm_patchtokens']
+        if args.enc_type is not None:
+            if isinstance(model, torch.nn.DataParallel):
+                raw_x = model.module.unpatchify(x, (H, W))
+            else:
+                raw_x = model.unpatchify(x, (H, W))
+            with torch.no_grad():
+                #raw_x = raw_x.to(torch.bfloat16)
+                #raw_x = vae.module.decode(raw_x / vae.config.scaling_factor).sample
+                raw_x = (raw_x + 1)/2.
+                raw_x = preprocess_raw_image(raw_x, args.enc_type)
+                raw_x = raw_x.to(torch.float32)
+                with accelerator.autocast():
+                    raw_z = encoders[0].forward_features(raw_x)
+                    if 'dinov2' in args.enc_type:
+                        raw_z_cls = raw_z['x_norm_clstoken']
+                        raw_z = raw_z['x_norm_patchtokens']
                 
                 #raw_z2 = encoders2[0].forward_features(raw_x)
 

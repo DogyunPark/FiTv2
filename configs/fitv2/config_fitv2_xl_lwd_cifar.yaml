@@ -59,7 +59,7 @@ diffusion:
       context_size: 256
       patch_size: 2
       in_channels: 3
-      hidden_size: 384
+      hidden_size: 768
       depth: 30
       num_heads: 6
       mlp_ratio: 4.0
@@ -67,7 +67,7 @@ diffusion:
       num_classes: 10
       learn_sigma: false
       use_sit: true
-      use_swiglu: false
+      use_swiglu: true
       use_swiglu_large: false
       use_checkpoint: false
       q_norm: layernorm
@@ -75,15 +75,15 @@ diffusion:
       qk_norm_weight: false
       rel_pos_embed: rope
       abs_pos_embed: null
-      adaln_type: lora
+      adaln_type: normal
       adaln_lora_dim: 288
-      number_of_perflow: 6
+      number_of_perflow: 1
       fourier_basis: false
       edm_sigmas: false
-      perlayer_embedder: true
+      perlayer_embedder: false
       overlap: false
       number_of_shared_blocks: 0
-      number_of_representation_blocks: 4
+      number_of_representation_blocks: 0
       max_cached_len: 256
   gan_guidance_config:
     sat: false

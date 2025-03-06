@@ -598,6 +598,7 @@ def main():
     H, W = n_patch_h * 2, n_patch_w * 2
     print('Generating images with resolution: ', H*8, 'x', W*8)
     y_test = torch.randint(0, 1000, (test_batch_size,), device=device)
+    print('Classes: ', y_test)
     noise_test = torch.randn((test_batch_size, n_patch_h*n_patch_w, (2**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
     noise_test_list = [torch.randn((test_batch_size, n_patch_h*n_patch_w, (2**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device) for _ in range(number_of_perflow-1)]
 

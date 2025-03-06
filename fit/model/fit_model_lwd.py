@@ -463,9 +463,9 @@ class FiTLwD(nn.Module):
             #representation_linear_jepa = self.linear_projection_jepa(representation_noise)
             representation_noise_mean = torch.mean(representation_noise, dim=1)
             representation_linear_cls = self.linear_projection_cls(representation_noise_mean)
-            drop_ids = torch.rand(x.shape[0], device=x.device) < 0.1
-            # Replace drop_ids of representation_noise_mean with zeros
-            representation_noise_mean = torch.where(drop_ids[:, None], 0, representation_noise_mean)
+            # drop_ids = torch.rand(x.shape[0], device=x.device) < 0.1
+            # # Replace drop_ids of representation_noise_mean with zeros
+            # representation_noise_mean = torch.where(drop_ids[:, None], 0, representation_noise_mean)
             c = torch.cat([c, representation_noise_mean], dim=1)
             #c = c + representation_noise_mean
         
@@ -666,8 +666,8 @@ class FiTLwD(nn.Module):
                             representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin)
                     
                     representation_noise_mean = torch.mean(representation_noise, dim=1)
-                    representation_noise_mean, _ = representation_noise_mean.chunk(2, dim=0)
-                    representation_noise_mean = torch.cat([representation_noise_mean, torch.zeros_like(representation_noise_mean)], dim=0)
+                    # representation_noise_mean, _ = representation_noise_mean.chunk(2, dim=0)
+                    # representation_noise_mean = torch.cat([representation_noise_mean, torch.zeros_like(representation_noise_mean)], dim=0)
                     c = torch.cat([c, representation_noise_mean], dim=1)
                     #c = c + representation_noise_mean
 
