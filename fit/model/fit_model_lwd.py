@@ -182,9 +182,6 @@ class FiTLwD(nn.Module):
             self.final_layer = nn.ModuleList([FinalLayer(hidden_size, patch_size, final_layer_out_channels, norm_layer=norm_type, adaln_bias=adaln_bias, adaln_type=adaln_type) for _ in range(number_of_perflow)])
         else:
             self.final_layer = FinalLayer(hidden_size, patch_size, final_layer_out_channels, norm_layer=norm_type, adaln_bias=adaln_bias, adaln_type=adaln_type)
-        self.initialize_weights(pretrain_ckpt=pretrain_ckpt, ignore=ignore_keys)
-        if finetune != None:
-            self.finetune(type=finetune, unfreeze=ignore_keys)
         
         if global_cls:
             self.pos_embed = nn.Parameter(torch.zeros(1, self.context_size+1, hidden_size))
@@ -192,6 +189,10 @@ class FiTLwD(nn.Module):
             nn.init.normal_(self.learnable_token, std=0.02)
         else:
             self.learnable_token = None
+            
+        self.initialize_weights(pretrain_ckpt=pretrain_ckpt, ignore=ignore_keys)
+        if finetune != None:
+            self.finetune(type=finetune, unfreeze=ignore_keys)
 
     def initialize_weights(self, pretrain_ckpt=None, ignore=None):
         # Initialize transformer layers:
