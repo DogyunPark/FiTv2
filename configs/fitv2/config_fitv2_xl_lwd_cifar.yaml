@@ -59,7 +59,7 @@ diffusion:
       context_size: 256
       patch_size: 2
       in_channels: 3
-      hidden_size: 384
+      hidden_size: 768
       depth: 30
       num_heads: 6
       mlp_ratio: 4.0
