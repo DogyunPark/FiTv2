@@ -255,12 +255,12 @@ class FiTBlock(nn.Module):
         if adaln_type == 'normal':
             self.adaLN_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(hidden_size*2, 6 * hidden_size, bias=adaln_bias)
+                nn.Linear(hidden_size, 6 * hidden_size, bias=adaln_bias)
             )
         elif adaln_type == 'lora':
             self.adaLN_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(hidden_size*2, adaln_lora_dim, bias=adaln_bias),
+                nn.Linear(hidden_size, adaln_lora_dim, bias=adaln_bias),
                 nn.Linear(adaln_lora_dim, 6 * hidden_size, bias=adaln_bias)
             )
         elif adaln_type == 'swiglu':
@@ -301,13 +301,13 @@ class RepresentationBlock(nn.Module):
         self.norm1 = create_norm(norm_layer, hidden_size)
         self.norm2 = create_norm(norm_layer, hidden_size)
         
-        # self.attn = Attention(
-        #     hidden_size, num_heads=num_heads, rel_pos_embed=rel_pos_embed, 
-        #     q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight,
-        #     qkv_bias=qkv_bias, add_rel_pe_to_v=add_rel_pe_to_v, 
-        #     **block_kwargs
-        # )
-        self.attn = VanillaAttention(hidden_size, num_heads, qkv_bias=qkv_bias, **block_kwargs)
+        self.attn = Attention(
+            hidden_size, num_heads=num_heads, rel_pos_embed=rel_pos_embed, 
+            q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight,
+            qkv_bias=qkv_bias, add_rel_pe_to_v=add_rel_pe_to_v, 
+            **block_kwargs
+        )
+        #self.attn = VanillaAttention(hidden_size, num_heads, qkv_bias=qkv_bias, **block_kwargs)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         if swiglu:
             if swiglu_large:
@@ -334,8 +334,8 @@ class RepresentationBlock(nn.Module):
 
     def forward(self, x, c, mask, freqs_cos, freqs_sin, global_adaln=0.0):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.adaLN_modulation(c) + global_adaln).chunk(6, dim=1)
-        #x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), mask, freqs_cos, freqs_sin)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), mask, freqs_cos, freqs_sin)
+        #x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
@@ -352,7 +352,7 @@ class FinalLayer(nn.Module):
         else:   # adaln_type in ['normal', 'lora']
             self.adaLN_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(hidden_size*2, 2 * hidden_size, bias=adaln_bias)
+                nn.Linear(hidden_size, 2 * hidden_size, bias=adaln_bias)
             )
         
     def forward(self, x, c):

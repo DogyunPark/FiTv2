@@ -102,9 +102,9 @@ class FiTLwD(nn.Module):
             self.representation_x_embedder = PatchEmbedder(in_channels * patch_size**2, hidden_size, bias=True)
             self.representation_blocks = nn.ModuleList([RepresentationBlock(
                 hidden_size, num_heads, mlp_ratio=mlp_ratio, swiglu=use_swiglu, swiglu_large=use_swiglu_large,
-                rel_pos_embed=None, add_rel_pe_to_v=add_rel_pe_to_v, norm_layer=norm_type, 
+                rel_pos_embed=rel_pos_embed, add_rel_pe_to_v=add_rel_pe_to_v, norm_layer=norm_type, 
                 q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight, qkv_bias=qkv_bias, ffn_bias=ffn_bias,
-                adaln_bias=adaln_bias, adaln_type='lora', adaln_lora_dim=adaln_lora_dim
+                adaln_bias=adaln_bias, adaln_type=adaln_type, adaln_lora_dim=adaln_lora_dim
             ) for _ in range(number_of_representation_blocks)])
             self.linear_projection = nn.Sequential(
                     nn.Linear(hidden_size, 2048),
@@ -364,9 +364,9 @@ class FiTLwD(nn.Module):
                 
                 if self.number_of_representation_blocks > 1:
                     #assert representation_noise is not None, "representation_noise must be provided when representation_blocks > 1"
-                    x_cat = torch.cat([self.learnable_token.repeat(x.shape[0], 1, 1), x], dim=1)
-                    representation_noise = self.representation_x_embedder(x_cat)
-                    representation_noise = representation_noise + self.pos_embed
+                    #x_cat = torch.cat([self.learnable_token.repeat(x.shape[0], 1, 1), x], dim=1)
+                    representation_noise = self.representation_x_embedder(x)
+                    #representation_noise = representation_noise + self.pos_embed
                     for rep_block in self.representation_blocks:
                         if not self.use_checkpoint:
                             representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin)
@@ -375,8 +375,8 @@ class FiTLwD(nn.Module):
                     
                     #representation_noise_mean = torch.mean(representation_noise, dim=1)
                     #representation_patch = representation_noise[:, 1:, :]
-                    representation_noise_mean = representation_noise[:, 0, :]
-                    c = torch.cat([c, representation_noise_mean], dim=1)
+                    #representation_noise_mean = representation_noise[:, 0, :]
+                    #c = torch.cat([c, representation_noise_mean], dim=1)
                     #c = c + representation_noise_mean
 
                 if self.global_adaLN_modulation != None:
@@ -392,8 +392,8 @@ class FiTLwD(nn.Module):
                 else:
                     x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
 
-                # if self.number_of_representation_blocks > 1:
-                #     x += representation_noise
+                if self.number_of_representation_blocks > 1:
+                    x += representation_noise
                 
                 if self.use_checkpoint:
                     if self.number_of_shared_blocks > 0:
@@ -468,9 +468,9 @@ class FiTLwD(nn.Module):
         if self.number_of_representation_blocks > 1:
             #assert representation_noise is not None, "representation_noise must be provided when representation_blocks > 1"
             
-            x_cat = torch.cat([self.learnable_token.repeat(x.shape[0], 1, 1), x], dim=1)
-            representation_noise = self.representation_x_embedder(x_cat)
-            representation_noise = representation_noise + self.pos_embed
+            #x_cat = torch.cat([self.learnable_token.repeat(x.shape[0], 1, 1), x], dim=1)
+            representation_noise = self.representation_x_embedder(x)
+            #representation_noise = representation_noise + self.pos_embed
             for rep_block in self.representation_blocks:
                 if not self.use_checkpoint:
                     representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin)
@@ -478,17 +478,17 @@ class FiTLwD(nn.Module):
                     representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin)
             
             #if 1:
-            #representation_linear = self.linear_projection(representation_noise)
+            representation_linear = self.linear_projection(representation_noise)
             #representation_linear_jepa = self.linear_projection_jepa(representation_noise)
             #representation_noise_mean = torch.mean(representation_noise, dim=1)
-            representation_patch = representation_noise[:, 1:, :]
-            representation_linear = self.linear_projection(representation_patch)
-            representation_noise_mean = representation_noise[:, 0, :]
-            representation_linear_cls = self.linear_projection_cls(representation_noise_mean)
+            #representation_patch = representation_noise[:, 1:, :]
+            #representation_linear = self.linear_projection(representation_patch)
+            #representation_noise_mean = representation_noise[:, 0, :]
+            #representation_linear_cls = self.linear_projection_cls(representation_noise_mean)
             drop_ids = torch.rand(x.shape[0], device=x.device) < 0.1
             # Replace drop_ids of representation_noise_mean with zeros
-            representation_noise_mean = torch.where(drop_ids[:, None], 0, representation_noise_mean)
-            c = torch.cat([c, representation_noise_mean], dim=1)
+            representation_noise = torch.where(drop_ids[:, None, None], 0, representation_noise)
+            #c = torch.cat([c, representation_noise_mean], dim=1)
             #c = c + representation_noise_mean
         
         if self.global_adaLN_modulation != None:
@@ -503,8 +503,8 @@ class FiTLwD(nn.Module):
         else:
             x = self.x_embedder(x)
         
-        # if self.number_of_representation_blocks > 1:
-        #     x += representation_noise
+        if self.number_of_representation_blocks > 1:
+            x += representation_noise
 
         if not self.use_checkpoint:
             if self.number_of_shared_blocks > 0:
@@ -533,7 +533,7 @@ class FiTLwD(nn.Module):
             x = rearrange(x, 'B N C -> B C N')
         
         if self.number_of_representation_blocks > 1:
-            return x, representation_linear, representation_linear_cls, representation_linear_cls
+            return x, representation_linear, None, None
         else:
             return x, None, None, None
     
@@ -680,9 +680,9 @@ class FiTLwD(nn.Module):
 
                 if self.number_of_representation_blocks > 1:
                     #assert representation_noise is not None, "representation_noise must be provided when representation_blocks > 1"
-                    x_cat = torch.cat([self.learnable_token.repeat(x.shape[0], 1, 1), x], dim=1)
-                    representation_noise = self.representation_x_embedder(x_cat)
-                    representation_noise = representation_noise + self.pos_embed
+                    #x_cat = torch.cat([self.learnable_token.repeat(x.shape[0], 1, 1), x], dim=1)
+                    representation_noise = self.representation_x_embedder(x)
+                    #representation_noise = representation_noise + self.pos_embed
                     for rep_block in self.representation_blocks:
                         if not self.use_checkpoint:
                             representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin)
@@ -690,10 +690,10 @@ class FiTLwD(nn.Module):
                             representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin)
                     
                     #representation_noise_mean = torch.mean(representation_noise, dim=1)
-                    representation_noise_mean = representation_noise[:, 0, :]
-                    representation_noise_mean, _ = representation_noise_mean.chunk(2, dim=0)
-                    representation_noise_mean = torch.cat([representation_noise_mean, torch.zeros_like(representation_noise_mean)], dim=0)
-                    c = torch.cat([c, representation_noise_mean], dim=1)
+                    #representation_noise_mean = representation_noise[:, 0, :]
+                    representation_noise, _ = representation_noise.chunk(2, dim=0)
+                    representation_noise = torch.cat([representation_noise, torch.zeros_like(representation_noise)], dim=0)
+                    #c = torch.cat([c, representation_noise], dim=1)
                     #c = c + representation_noise_mean
 
                 if self.global_adaLN_modulation != None:
@@ -708,8 +708,8 @@ class FiTLwD(nn.Module):
                 else:
                     x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
                 
-                # if self.number_of_representation_blocks > 1:
-                #     x += representation_noise
+                if self.number_of_representation_blocks > 1:
+                    x += representation_noise
 
                 if self.use_checkpoint:
                     if self.number_of_shared_blocks > 0:
