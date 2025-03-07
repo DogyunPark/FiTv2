@@ -842,7 +842,7 @@ def main():
                             repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
                             proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
                         
-                        proj_loss_per += mean_flat((representation_linear_cls - raw_z_cls)**2).sum()
+                        #proj_loss_per += mean_flat((representation_linear_cls - raw_z_cls)**2).sum()
                     else:
                         for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_jepa, raw_z2)):
                             raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
@@ -895,7 +895,7 @@ def main():
         # Backpropagate
         loss = loss / (number_of_perflow)
         proj_loss = proj_loss / number_of_perflow
-        #loss += proj_loss
+        loss += proj_loss
         optimizer.zero_grad()
         accelerator.backward(loss)
         if accelerator.sync_gradients and accelerate_cfg.max_grad_norm > 0.:
