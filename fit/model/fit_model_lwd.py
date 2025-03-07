@@ -189,7 +189,7 @@ class FiTLwD(nn.Module):
             nn.init.normal_(self.learnable_token, std=0.02)
         else:
             self.learnable_token = None
-            
+
         self.initialize_weights(pretrain_ckpt=pretrain_ckpt, ignore=ignore_keys)
         if finetune != None:
             self.finetune(type=finetune, unfreeze=ignore_keys)
@@ -204,7 +204,7 @@ class FiTLwD(nn.Module):
         self.apply(_basic_init)
 
         if self.global_cls:
-            pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], self.context_size+1, cls_token=True)
+            pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], self.context_size+1, cls_token=True, extra_tokens=1)
             self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
         if self.number_of_representation_blocks > 1:
