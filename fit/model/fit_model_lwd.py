@@ -67,7 +67,7 @@ class FiTLwD(nn.Module):
         max_cached_len: int = 256,
         number_of_shared_blocks: int = 1,
         number_of_representation_blocks: int = 1,
-        global_cls: bool = False,
+        global_cls: bool = True,
         **kwargs,
     ):
         super().__init__()
