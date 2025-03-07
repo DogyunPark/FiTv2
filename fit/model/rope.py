@@ -12,6 +12,7 @@ from math import pi
 from typing import Optional, Any, Union, Tuple
 import torch
 from torch import nn
+import numpy as np
 
 from einops import rearrange, repeat
 from functools import lru_cache
@@ -98,7 +99,7 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 
     emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
     return emb
-    
+
 #################################################################################
 #                                 Rotate Q or K                                 #
 #################################################################################
