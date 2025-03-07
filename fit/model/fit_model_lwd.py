@@ -106,13 +106,13 @@ class FiTLwD(nn.Module):
                 q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight, qkv_bias=qkv_bias, ffn_bias=ffn_bias,
                 adaln_bias=adaln_bias, adaln_type='lora', adaln_lora_dim=adaln_lora_dim
             ) for _ in range(number_of_representation_blocks)])
-            # self.linear_projection = nn.Sequential(
-            #         nn.Linear(hidden_size, 2048),
-            #         nn.SiLU(),
-            #         nn.Linear(2048, 2048),
-            #         nn.SiLU(),
-            #         nn.Linear(2048, 1024),
-            #     )
+            self.linear_projection = nn.Sequential(
+                    nn.Linear(hidden_size, 2048),
+                    nn.SiLU(),
+                    nn.Linear(2048, 2048),
+                    nn.SiLU(),
+                    nn.Linear(2048, 1024),
+                )
             self.linear_projection_cls = nn.Sequential(
                     nn.Linear(hidden_size, 2048),
                     nn.SiLU(),
@@ -481,11 +481,13 @@ class FiTLwD(nn.Module):
             #representation_linear = self.linear_projection(representation_noise)
             #representation_linear_jepa = self.linear_projection_jepa(representation_noise)
             #representation_noise_mean = torch.mean(representation_noise, dim=1)
+            representation_patch = representation_noise[:, 1:, :]
+            representation_linear = self.linear_projection(representation_patch)
             representation_noise_mean = representation_noise[:, 0, :]
             representation_linear_cls = self.linear_projection_cls(representation_noise_mean)
-            # drop_ids = torch.rand(x.shape[0], device=x.device) < 0.1
-            # # Replace drop_ids of representation_noise_mean with zeros
-            # representation_noise_mean = torch.where(drop_ids[:, None], 0, representation_noise_mean)
+            drop_ids = torch.rand(x.shape[0], device=x.device) < 0.1
+            # Replace drop_ids of representation_noise_mean with zeros
+            representation_noise_mean = torch.where(drop_ids[:, None], 0, representation_noise_mean)
             c = torch.cat([c, representation_noise_mean], dim=1)
             #c = c + representation_noise_mean
         
@@ -531,7 +533,7 @@ class FiTLwD(nn.Module):
             x = rearrange(x, 'B N C -> B C N')
         
         if self.number_of_representation_blocks > 1:
-            return x, representation_linear_cls, representation_linear_cls, representation_linear_cls
+            return x, representation_linear, representation_linear_cls, representation_linear_cls
         else:
             return x, None, None, None
     
@@ -689,8 +691,8 @@ class FiTLwD(nn.Module):
                     
                     #representation_noise_mean = torch.mean(representation_noise, dim=1)
                     representation_noise_mean = representation_noise[:, 0, :]
-                    # representation_noise_mean, _ = representation_noise_mean.chunk(2, dim=0)
-                    # representation_noise_mean = torch.cat([representation_noise_mean, torch.zeros_like(representation_noise_mean)], dim=0)
+                    representation_noise_mean, _ = representation_noise_mean.chunk(2, dim=0)
+                    representation_noise_mean = torch.cat([representation_noise_mean, torch.zeros_like(representation_noise_mean)], dim=0)
                     c = torch.cat([c, representation_noise_mean], dim=1)
                     #c = c + representation_noise_mean
 

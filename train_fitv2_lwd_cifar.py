@@ -830,10 +830,10 @@ def main():
                     proj_loss_per = 0.0
                     #if layer_idx < int(number_of_perflow/2):
                     if 1:
-                        # for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z)):
-                        #     raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
-                        #     repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
-                        #     proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z)):
+                            raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
+                            repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
+                            proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
                         
                         #proj_loss_per += 0.1 * mean_flat((representation_linear - raw_z)**2).sum()
                         
