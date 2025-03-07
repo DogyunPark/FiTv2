@@ -204,7 +204,7 @@ class FiTLwD(nn.Module):
         self.apply(_basic_init)
 
         if self.global_cls:
-            pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], self.context_size, cls_token=True, extra_tokens=1)
+            pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.context_size**0.5), cls_token=True, extra_tokens=1)
             self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
         if self.number_of_representation_blocks > 1:
