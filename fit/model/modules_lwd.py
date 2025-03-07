@@ -11,6 +11,7 @@ from fit.model.utils import modulate
 from fit.model.norms import create_norm
 from functools import partial
 from einops import rearrange, repeat
+from timm.models.vision_transformer import Attention as VanillaAttention
 
 #################################################################################
 #           Embedding Layers for Patches, Timesteps and Class Labels            #
@@ -300,12 +301,13 @@ class RepresentationBlock(nn.Module):
         self.norm1 = create_norm(norm_layer, hidden_size)
         self.norm2 = create_norm(norm_layer, hidden_size)
         
-        self.attn = Attention(
-            hidden_size, num_heads=num_heads, rel_pos_embed=rel_pos_embed, 
-            q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight,
-            qkv_bias=qkv_bias, add_rel_pe_to_v=add_rel_pe_to_v, 
-            **block_kwargs
-        )
+        # self.attn = Attention(
+        #     hidden_size, num_heads=num_heads, rel_pos_embed=rel_pos_embed, 
+        #     q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight,
+        #     qkv_bias=qkv_bias, add_rel_pe_to_v=add_rel_pe_to_v, 
+        #     **block_kwargs
+        # )
+        self.attn = VanillaAttention(hidden_size, num_heads, qkv_bias=qkv_bias, **block_kwargs)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         if swiglu:
             if swiglu_large:
