@@ -895,7 +895,7 @@ def main():
         # Backpropagate
         loss = loss / (number_of_perflow)
         proj_loss = proj_loss / number_of_perflow
-        loss += proj_loss
+        #loss += proj_loss
         optimizer.zero_grad()
         accelerator.backward(loss)
         if accelerator.sync_gradients and accelerate_cfg.max_grad_norm > 0.:
