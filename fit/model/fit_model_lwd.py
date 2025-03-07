@@ -186,7 +186,7 @@ class FiTLwD(nn.Module):
             self.finetune(type=finetune, unfreeze=ignore_keys)
         
         if global_cls:
-            self.learnable_token = nn.Parameter(torch.zeros(1, 1, hidden_size))
+            self.learnable_token = nn.Parameter(torch.zeros(1, 1, patch_size*patch_size*in_channels))
             nn.init.normal_(self.learnable_token, std=0.02)
         else:
             self.learnable_token = None
