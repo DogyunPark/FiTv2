@@ -1,4 +1,4 @@
-
+import os
 os.environ['TMPDIR'] = '/hub_data2/dogyun/tmpdir'
 os.environ['TEMP'] = '/hub_data2/dogyun/tmpdir'
 os.environ['TMP'] = '/hub_data2/dogyun/tmpdir'
