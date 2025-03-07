@@ -125,6 +125,11 @@ class FiTLwD(nn.Module):
             #         nn.SiLU(),
             #         nn.Linear(2048, 1280),
             #     )
+            self.linear_projection_cls2 = nn.Sequential(
+                    nn.Linear(hidden_size, hidden_size),
+                    nn.SiLU(),
+                    nn.Linear(hidden_size, hidden_size),
+                )
 
         if number_of_shared_blocks > 0:
             self.start_shared_blocks = nn.ModuleList([FiTBlock(
@@ -462,11 +467,12 @@ class FiTLwD(nn.Module):
             #representation_linear = self.linear_projection(representation_noise)
             #representation_linear_jepa = self.linear_projection_jepa(representation_noise)
             representation_noise_mean = torch.mean(representation_noise, dim=1)
+            representation_noise_mean = self.linear_projection_cls2(representation_noise_mean)
             representation_linear_cls = self.linear_projection_cls(representation_noise_mean)
             drop_ids = torch.rand(x.shape[0], device=x.device) < 0.1
             # Replace drop_ids of representation_noise_mean with zeros
             representation_noise_mean = torch.where(drop_ids[:, None], 0, representation_noise_mean)
-            c = torch.cat([c, representation_noise_mean], dim=1)
+            c = torch.cat([c, representation_noise_mean.detach()], dim=1)
             #c = c + representation_noise_mean
         
         if self.global_adaLN_modulation != None:
