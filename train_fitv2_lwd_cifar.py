@@ -898,7 +898,7 @@ def main():
         # Backpropagate
         loss = loss / (number_of_perflow)
         proj_loss = proj_loss / number_of_perflow
-        loss += 0.5 * proj_loss
+        loss += proj_loss
         optimizer.zero_grad()
         accelerator.backward(loss)
         if accelerator.sync_gradients and accelerate_cfg.max_grad_norm > 0.:
@@ -1080,8 +1080,6 @@ def main():
                     if getattr(accelerate_cfg, 'logger', 'wandb') != None:
                         accelerator.log({"fid": fid}, step=global_steps)
             accelerator.wait_for_everyone()
-        
-        torch.cuda.empty_cache()
 
         logs = {"step_loss": loss.detach().item(), 
                 "lr": lr_scheduler.get_last_lr()[0]}

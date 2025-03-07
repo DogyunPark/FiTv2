@@ -102,15 +102,15 @@ class FiTLwD(nn.Module):
                 hidden_size, num_heads, mlp_ratio=mlp_ratio, swiglu=use_swiglu, swiglu_large=use_swiglu_large,
                 rel_pos_embed=rel_pos_embed, add_rel_pe_to_v=add_rel_pe_to_v, norm_layer=norm_type, 
                 q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight, qkv_bias=qkv_bias, ffn_bias=ffn_bias,
-                adaln_bias=adaln_bias, adaln_type='normal', adaln_lora_dim=adaln_lora_dim
+                adaln_bias=adaln_bias, adaln_type='lora', adaln_lora_dim=adaln_lora_dim
             ) for _ in range(number_of_representation_blocks)])
-            self.linear_projection = nn.Sequential(
-                    nn.Linear(hidden_size, 2048),
-                    nn.SiLU(),
-                    nn.Linear(2048, 2048),
-                    nn.SiLU(),
-                    nn.Linear(2048, 1024),
-                )
+            # self.linear_projection = nn.Sequential(
+            #         nn.Linear(hidden_size, 2048),
+            #         nn.SiLU(),
+            #         nn.Linear(2048, 2048),
+            #         nn.SiLU(),
+            #         nn.Linear(2048, 1024),
+            #     )
             self.linear_projection_cls = nn.Sequential(
                     nn.Linear(hidden_size, 2048),
                     nn.SiLU(),
@@ -459,7 +459,7 @@ class FiTLwD(nn.Module):
                     representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin)
             
             #if 1:
-            representation_linear = self.linear_projection(representation_noise)
+            #representation_linear = self.linear_projection(representation_noise)
             #representation_linear_jepa = self.linear_projection_jepa(representation_noise)
             representation_noise_mean = torch.mean(representation_noise, dim=1)
             representation_linear_cls = self.linear_projection_cls(representation_noise_mean)
@@ -511,7 +511,7 @@ class FiTLwD(nn.Module):
             x = rearrange(x, 'B N C -> B C N')
         
         if self.number_of_representation_blocks > 1:
-            return x, representation_linear, representation_linear_cls, representation_linear_cls
+            return x, representation_linear_cls, representation_linear_cls, representation_linear_cls
         else:
             return x, None, None, None
     
