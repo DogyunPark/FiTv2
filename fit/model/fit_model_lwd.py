@@ -374,6 +374,7 @@ class FiTLwD(nn.Module):
                             representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin)
                     
                     #representation_noise_mean = torch.mean(representation_noise, dim=1)
+                    #representation_patch = representation_noise[:, 1:, :]
                     representation_noise_mean = representation_noise[:, 0, :]
                     c = torch.cat([c, representation_noise_mean], dim=1)
                     #c = c + representation_noise_mean
@@ -391,8 +392,8 @@ class FiTLwD(nn.Module):
                 else:
                     x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
 
-                # if self.number_of_representation_blocks > 1:
-                #     x += representation_noise
+                if self.number_of_representation_blocks > 1:
+                    x += representation_noise
                 
                 if self.use_checkpoint:
                     if self.number_of_shared_blocks > 0:
@@ -482,9 +483,9 @@ class FiTLwD(nn.Module):
             #representation_noise_mean = torch.mean(representation_noise, dim=1)
             representation_noise_mean = representation_noise[:, 0, :]
             representation_linear_cls = self.linear_projection_cls(representation_noise_mean)
-            drop_ids = torch.rand(x.shape[0], device=x.device) < 0.1
-            # Replace drop_ids of representation_noise_mean with zeros
-            representation_noise_mean = torch.where(drop_ids[:, None], 0, representation_noise_mean)
+            # drop_ids = torch.rand(x.shape[0], device=x.device) < 0.1
+            # # Replace drop_ids of representation_noise_mean with zeros
+            # representation_noise_mean = torch.where(drop_ids[:, None], 0, representation_noise_mean)
             c = torch.cat([c, representation_noise_mean], dim=1)
             #c = c + representation_noise_mean
         
@@ -688,8 +689,8 @@ class FiTLwD(nn.Module):
                     
                     #representation_noise_mean = torch.mean(representation_noise, dim=1)
                     representation_noise_mean = representation_noise[:, 0, :]
-                    representation_noise_mean, _ = representation_noise_mean.chunk(2, dim=0)
-                    representation_noise_mean = torch.cat([representation_noise_mean, torch.zeros_like(representation_noise_mean)], dim=0)
+                    # representation_noise_mean, _ = representation_noise_mean.chunk(2, dim=0)
+                    # representation_noise_mean = torch.cat([representation_noise_mean, torch.zeros_like(representation_noise_mean)], dim=0)
                     c = torch.cat([c, representation_noise_mean], dim=1)
                     #c = c + representation_noise_mean
 
