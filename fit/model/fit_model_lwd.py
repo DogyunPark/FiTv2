@@ -67,7 +67,7 @@ class FiTLwD(nn.Module):
         max_cached_len: int = 256,
         number_of_shared_blocks: int = 1,
         number_of_representation_blocks: int = 1,
-        global_cls: bool = True,
+        global_cls: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -113,13 +113,13 @@ class FiTLwD(nn.Module):
                     nn.SiLU(),
                     nn.Linear(2048, 1024),
                 )
-            self.linear_projection_cls = nn.Sequential(
-                    nn.Linear(hidden_size, 2048),
-                    nn.SiLU(),
-                    nn.Linear(2048, 2048),
-                    nn.SiLU(),
-                    nn.Linear(2048, 1024),
-                )
+            # self.linear_projection_cls = nn.Sequential(
+            #         nn.Linear(hidden_size, 2048),
+            #         nn.SiLU(),
+            #         nn.Linear(2048, 2048),
+            #         nn.SiLU(),
+            #         nn.Linear(2048, 1024),
+            #     )
             # self.linear_projection_jepa = nn.Sequential(
             #         nn.Linear(hidden_size, 2048),
             #         nn.SiLU(),
@@ -165,7 +165,7 @@ class FiTLwD(nn.Module):
         if adaln_type == 'lora':
             self.global_adaLN_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(hidden_size*2, 6 * hidden_size, bias=adaln_bias)
+                nn.Linear(hidden_size, 6 * hidden_size, bias=adaln_bias)
             )
         else:
             self.global_adaLN_modulation = None        
@@ -628,7 +628,7 @@ class FiTLwD(nn.Module):
 
         assert cfg > 1, "cfg must be greater than 1"
         y_null = torch.tensor([self.num_classes] * x.shape[0], device=x.device)
-        y = torch.cat([y, y_null], dim=0)
+        y = torch.cat([y, y], dim=0)
         # if self.perlayer_embedder:
         #     y_embed = self.y_embedder[0](y, self.training)           # (B, D)
         # else:

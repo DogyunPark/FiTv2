@@ -1011,6 +1011,24 @@ def main():
                     with accelerator.autocast():
                         #output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test)
                         if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
+                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 1.5, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list, representation_noise=noise_test)
+                        else:
+                            output_test = ema_model.forward_cfg(noise_test, t_test, 1.5, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list, representation_noise=noise_test)
+
+                    samples = output_test[:, : n_patch_h*n_patch_w]
+                    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                        samples = model.module.unpatchify(samples, (H, W))
+                    else:
+                        samples = model.unpatchify(samples, (H, W))
+                    samples = samples.clamp(-1, 1)     
+                    #samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
+                    
+                    if accelerator.is_main_process:
+                        torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-NFE6-15.jpg"), value_range=(-1, 1), normalize=True, scale_each=True)
+
+                    with accelerator.autocast():
+                        #output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test)
+                        if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
                             output_test = ema_model.module.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list, representation_noise=noise_test)
                         else:
                             output_test = ema_model.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list, representation_noise=noise_test)
@@ -1055,9 +1073,9 @@ def main():
                         with accelerator.autocast():
                             #output_test = ema_model(latents, t_test, cfg_scale_cond_test, **model_kwargs_fid, number_of_step_perflow=2)
                             if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                                output_test = ema_model.module.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=2, representation_noise=latents)
+                                output_test = ema_model.module.forward_cfg(latents, t_test, 1.5, **model_kwargs_fid, number_of_step_perflow=2, representation_noise=latents)
                             else:
-                                output_test = ema_model.forward_cfg(latents, t_test, 2, **model_kwargs_fid, number_of_step_perflow=2, representation_noise=latents)
+                                output_test = ema_model.forward_cfg(latents, t_test, 1.5, **model_kwargs_fid, number_of_step_perflow=2, representation_noise=latents)
 
                         samples = output_test[:, : n_patch_h*n_patch_w]
                         if isinstance(model, torch.nn.parallel.DistributedDataParallel):

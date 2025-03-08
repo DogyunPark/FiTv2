@@ -765,19 +765,19 @@ def main():
                     proj_loss_per = 0.0
                     #if layer_idx <= int(number_of_perflow/2):
                     if 1:
-                        # for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z)):
-                        #     raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
-                        #     repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
-                        #     proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
-                        
-                        #proj_loss_per += 0.1 * mean_flat((representation_linear - raw_z)**2).sum()
-                        
-                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_cls, raw_z_cls)):
+                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z)):
                             raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
                             repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
                             proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
                         
-                        proj_loss_per += 0.1 * mean_flat((representation_linear_cls - raw_z_cls)**2).sum()
+                        #proj_loss_per += 0.1 * mean_flat((representation_linear - raw_z)**2).sum()
+                        
+                        # for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_cls, raw_z_cls)):
+                        #     raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
+                        #     repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
+                        #     proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                        
+                        # proj_loss_per += 0.1 * mean_flat((representation_linear_cls - raw_z_cls)**2).sum()
                     else:
                         for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_jepa, raw_z2)):
                             raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
@@ -923,12 +923,28 @@ def main():
                     #         img = Image.fromarray(img_tensor.cpu().numpy())
                     #         img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-{i}.jpg"))
                     
+                    with accelerator.autocast():
+                        if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
+                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 1.5, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list)
+                        else:
+                            output_test = ema_model.forward_cfg(noise_test, t_test, 1.5, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list)
+
+                    samples = output_test[..., : n_patch_h*n_patch_w]
+                    if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
+                        samples = ema_model.module.unpatchify(samples, (H, W))
+                    else:
+                        samples = ema_model.unpatchify(samples, (H, W))
+                    samples = samples.to(torch.bfloat16)     
+                    samples = vae.decode(samples / vae.config.scaling_factor).sample
+                    samples = samples.clamp(-1, 1)
+                    torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-NFE10-15.jpg"), normalize=True, scale_each=True)
+
                     # CFG Sampling
                     with accelerator.autocast():
                         if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 4, **model_kwargs_test, number_of_step_perflow=10, noise=noise_test_list)
+                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list)
                         else:
-                            output_test = ema_model.forward_cfg(noise_test, t_test, 4, **model_kwargs_test, number_of_step_perflow=10, noise=noise_test_list)
+                            output_test = ema_model.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list)
 
                     samples = output_test[..., : n_patch_h*n_patch_w]
                     if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
