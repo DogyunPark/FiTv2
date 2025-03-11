@@ -102,7 +102,7 @@ data:
       target_len: 256
       random: 'random'
       loader:
-        batch_size: 48
+        batch_size: 42
         num_workers: 4
         shuffle: True
 
@@ -138,7 +138,7 @@ accelerate:
   checkpoints_total_limit: 2
   logging_steps: 1000
   evaluation_steps: 200
-  eval_fid_steps: 5000
+  eval_fid_steps: 2500
 
   # fsdp_config:
   #   sharding_strategy: FULL_SHARD

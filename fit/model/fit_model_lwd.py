@@ -89,7 +89,7 @@ class FiTLwD(nn.Module):
         self.online_rope = online_rope
         self.time_shifting = time_shifting
         self.sigmas = torch.linspace(0, 1, number_of_perflow+1)
-        self.sigmas_overlap = self.sigmas - 1/(number_of_perflow*5)
+        self.sigmas_overlap = self.sigmas - 1/(number_of_perflow*2)
         self.overlap = overlap
         self.perlayer_embedder = perlayer_embedder
         self.number_of_perflow = number_of_perflow
@@ -691,6 +691,7 @@ class FiTLwD(nn.Module):
                     
                     #representation_noise_mean = torch.mean(representation_noise, dim=1)
                     #representation_noise_mean = representation_noise[:, 0, :]
+                    #if i <= (len(self.blocks) // self.number_of_layers_for_perflow) // 2:
                     representation_noise, _ = representation_noise.chunk(2, dim=0)
                     representation_noise = torch.cat([representation_noise, torch.zeros_like(representation_noise)], dim=0)
                     #c = torch.cat([c, representation_noise], dim=1)
