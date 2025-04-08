@@ -69,7 +69,7 @@ diffusion:
       use_sit: true
       use_swiglu: true
       use_swiglu_large: false
-      use_checkpoint: true
+      use_checkpoint: false
       q_norm: layernorm
       k_norm: layernorm
       qk_norm_weight: false
@@ -137,7 +137,7 @@ accelerate:
   checkpointing_steps_list: [500, 200000, 400000, 1000000, 1400000, 1500000, 1800000]
   checkpoints_total_limit: 2
   logging_steps: 1000
-  evaluation_steps: 200
+  evaluation_steps: 10
   eval_fid_steps: 2500
 
   # fsdp_config:

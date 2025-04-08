@@ -21,18 +21,18 @@ diffusion:
       rtol: 0.001
       reverse: false
       likelihood: false
-  network_config:
-    target: fit.model.fit_model.FiT
+  distillation_network_config:
+    target: fit.model.fit_model_lwd.FiTLwD
     params:
       context_size: 256
       patch_size: 2
-      in_channels: 4
-      hidden_size: 1152
-      depth: 36
-      num_heads: 16
+      in_channels: 3
+      hidden_size: 768
+      depth: 48
+      num_heads: 6
       mlp_ratio: 4.0
-      class_dropout_prob: 0.1
-      num_classes: 1000
+      class_dropout_prob: 0.0
+      num_classes: 10
       learn_sigma: false
       use_sit: true
       use_swiglu: true
@@ -44,25 +44,37 @@ diffusion:
       rel_pos_embed: rope
       abs_pos_embed: null
       adaln_type: lora
-      adaln_lora_dim: 288
-
+      adaln_lora_dim: 192
+      number_of_perflow: 12
+      fourier_basis: false
+      edm_sigmas: false
+      perlayer_embedder: false
+      overlap: false
+      number_of_shared_blocks: 0
+      number_of_representation_blocks: 4
+      max_cached_len: 256
+      n_patch_h: 16
+      n_patch_w: 16
+      multi_scale: true
+      down_scale_factor: 2
 data:
   target: fit.data.in1k_latent_dataset.INLatentLoader
+  class_num: 10
   params:
     train:
       data_path: datasets/imagenet1k_latents_256_sd_vae_ft_ema
       target_len: 256
       random: 'random'
       loader:
-        batch_size: 16
-        num_workers: 2
+        batch_size: 50
+        num_workers: 4
         shuffle: True
 
 
 accelerate:
   # others
-  gradient_accumulation_steps: 1
-  mixed_precision: 'bf16'
+  gradient_accumulation_steps: 2
+  mixed_precision: 'fp16'
   # training step config
   num_train_epochs: 
   max_train_steps: 2000000
@@ -75,29 +87,35 @@ accelerate:
     #target: CAME
     params:
       betas: ${tuple:0.9, 0.999}
-      weight_decay: 0 #1.0e-2
+      weight_decay: 1.0e-2
       eps: 1.0e-8
       # betas: ${tuple:0.9, 0.999, 0.9999}
       # weight_decay: 1.0e-2
       # eps: ${tuple:1e-30, 1e-16}
   lr_scheduler: constant_with_warmup
-  lr_warmup_steps: 50000
+  lr_warmup_steps: 0
   # checkpoint config
   logger: wandb
   checkpointing_epochs: False
-  checkpointing_steps: 4000
+  checkpointing_steps: 5000
   checkpointing_steps_list: [500, 200000, 400000, 1000000, 1400000, 1500000, 1800000]
   checkpoints_total_limit: 2
   logging_steps: 1000
+  evaluation_steps: 200
+  eval_fid_steps: 2500
+  test_batch_size: 20
+  test_fid_batch_size: 50
+  test_nfe: 2
+  test_cfg_scale: 2
 
-  fsdp_config:
-    sharding_strategy: FULL_SHARD
-    backward_prefetch: BACKWARD_PRE
-    min_num_params: 10000000
-    cpu_offload: False
-    state_dict_type: FULL_STATE_DICT
-    limit_all_gathers: false
-    use_orig_params: true
-    sync_module_states: true
-    forward_prefetch: false
-    activation_checkpointing: false
+  # fsdp_config:
+  #   sharding_strategy: FULL_SHARD
+  #   backward_prefetch: BACKWARD_PRE
+  #   min_num_params: 10000000
+  #   cpu_offload: False
+  #   state_dict_type: FULL_STATE_DICT
+  #   limit_all_gathers: false
+  #   use_orig_params: true
+  #   sync_module_states: true
+  #   forward_prefetch: false
+  #   activation_checkpointing: false

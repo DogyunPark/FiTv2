@@ -48,9 +48,9 @@ from fit.model.fit_model import FiTBlock
 from fit.model.modules import FinalLayer, PatchEmbedder, TimestepEmbedder, LabelEmbedder
 from fit.scheduler.transport.utils import get_flexible_mask_and_ratio, mean_flat
 
-from came_pytorch import CAME
+#from came_pytorch import CAME
 from PIL import Image
-from elatentlpips import ELatentLPIPS
+#from elatentlpips import ELatentLPIPS
 from fit.scheduler.transport.utils import loss_func_huber
 from fit.utils.utils import bell_shaped_sample, symmetric_segment_division, linear_increase_division, sample_posterior
 from fit.utils.evaluator import Evaluator
@@ -236,6 +236,18 @@ def parse_args():
         default=None,
         help="The type of encoder to use."
     )
+    parser.add_argument(
+        "--multi_scale",
+        action="store_true",
+        default=False,
+        help="Whether to use multi-scale."
+    )
+    parser.add_argument(
+        "--structured_loss",
+        action="store_true",
+        default=False,
+        help="Whether to use structured loss."
+    )
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -397,7 +409,7 @@ def main():
         pretrained_model.eval()
 
     model = instantiate_from_config(diffusion_cfg.distillation_network_config).to(device=device)
-    #init_from_ckpt(model, checkpoint_dir=args.pretrain_ckpt2, ignore_keys=None, verbose=True)
+    #init_from_ckpt(model, checkpoint_dir=args.pretrain_ckpt2, ignore_keys='y_embedder', verbose=True)
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     fixed_params = sum(p.numel() for p in model.parameters() if not p.requires_grad) 
@@ -418,8 +430,8 @@ def main():
     #scheduler.set_timesteps(num_inference_steps, device=device)
     #timesteps = scheduler.timesteps
     #sigmas = scheduler.sigmas
-    #sigmas = torch.linspace(0, 1, number_of_perflow+1).to(device)
-    sigmas = linear_increase_division(number_of_perflow)
+    sigmas = torch.linspace(0, 1, 3+1).to(device)
+    #sigmas = linear_increase_division(number_of_perflow)
     #sigmas = symmetric_segment_division(number_of_perflow)
     sigmas = sigmas.to(device=device)
     logger.info(f"Sigmas: {sigmas}")
@@ -521,7 +533,7 @@ def main():
 
    
     vae_model = 'stabilityai/sd-vae-ft-ema'
-    vae = AutoencoderKL.from_pretrained(vae_model, local_files_only=True).to(device, dtype=torch.bfloat16)
+    vae = AutoencoderKL.from_pretrained(vae_model, local_files_only=False).to(device, dtype=torch.bfloat16)
     vae.eval() # important
 
     if args.use_elpips:
@@ -598,15 +610,34 @@ def main():
     model.train()
     train_loss = 0.0
 
-    test_batch_size = 4
-    n_patch_h, n_patch_w = 16, 16
-    patch_size = 2
-    H, W = n_patch_h * 2, n_patch_w * 2
-    print('Generating images with resolution: ', H*8, 'x', W*8)
-    y_test = torch.randint(0, 1000, (test_batch_size,), device=device)
-    print('Classes: ', y_test)
-    noise_test = torch.randn((test_batch_size, n_patch_h*n_patch_w, (2**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
-    noise_test_list = [torch.randn((test_batch_size, n_patch_h*n_patch_w, (2**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device) for _ in range(number_of_perflow-1)]
+    test_batch_size = accelerate_cfg.test_batch_size
+    n_patch_h, n_patch_w = diffusion_cfg.distillation_network_config.params.n_patch_h, diffusion_cfg.distillation_network_config.params.n_patch_w
+    patch_size = diffusion_cfg.distillation_network_config.params.patch_size
+    H, W = n_patch_h * patch_size, n_patch_w * patch_size
+    print('Generating images with resolution: ', H, 'x', W)
+    y_test = torch.randint(0, data_cfg.class_num, (test_batch_size,), device=device)
+    print('Class: ', y_test)
+    if diffusion_cfg.distillation_network_config.params.multi_scale:
+        print('Multi-scale: ', diffusion_cfg.distillation_network_config.params.multi_scale)
+        print('Down-scale factor: ', diffusion_cfg.distillation_network_config.params.down_scale_factor)
+        down_scale_factor = diffusion_cfg.distillation_network_config.params.down_scale_factor
+        noise_test = torch.randn((test_batch_size, diffusion_cfg.distillation_network_config.params.in_channels, H, W)).to(device=device)
+        HX, WX = H, W
+        for _ in range(down_scale_factor):
+            HX = HX//2
+            WX = WX//2
+            noise_test = torch.nn.functional.interpolate(noise_test, size=(HX, WX), mode='bilinear') * 2
+        noise_test = noise_test.reshape(test_batch_size, -1, n_patch_h//(2**down_scale_factor), patch_size, n_patch_w//(2**down_scale_factor), patch_size)
+        noise_test = rearrange(noise_test, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+        noise_test = noise_test.permute(0, 2, 1)
+        multi_scale_index_list = [int(number_of_perflow//3), int(2*(number_of_perflow//3))]
+        print('Multi scale index:', multi_scale_index_list)
+    else:
+        noise_test = torch.randn((test_batch_size, n_patch_h*n_patch_w, (patch_size**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
+    
+    noise_test_list = [torch.randn((test_batch_size, n_patch_h*n_patch_w, (patch_size**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device) for _ in range(number_of_perflow-1)]
+    per_blocks_list = [2, 5, 5]
+    per_blocks_accum = [2, 7, 12]
     for step, batch in enumerate(train_dataloader, start=global_steps):
         # for batch_key in batch.keys():
         #     if not isinstance(batch[batch_key], list):
@@ -621,23 +652,7 @@ def main():
         raw_x = raw_x.to(device)
         x = x.to(device)
         y = y.to(device)
-        x = sample_posterior(x, vae.config.scaling_factor)
-        x = x.reshape(x.shape[0], -1, n_patch_h, patch_size, n_patch_w, patch_size)
-        x = rearrange(x, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
-        x = x.permute(0, 2, 1)
-
-        grid_h = torch.arange(n_patch_h, dtype=torch.long)
-        grid_w = torch.arange(n_patch_w, dtype=torch.long)
-        grid = torch.meshgrid(grid_w, grid_h, indexing='xy')
-        grid = torch.cat(
-            [grid[0].reshape(1,-1), grid[1].reshape(1,-1)], dim=0
-        ).repeat(x.shape[0],1,1).to(device=device, dtype=torch.long)
-        mask = torch.ones(x.shape[0], n_patch_h*n_patch_w).to(device=device, dtype=torch.bfloat16)
-        size = torch.tensor((n_patch_h, n_patch_w)).repeat(x.shape[0],1).to(device=device, dtype=torch.long)
-        size = size[:, None, :]
-
-        N_batch = int(torch.max(torch.sum(size[..., 0] * size[..., 1], dim=-1)))
-        x, grid, mask = x[:, : N_batch], grid[..., : N_batch], mask[:, : N_batch]
+        x_data = sample_posterior(x, vae.config.scaling_factor)
         
         # prepare other parameters
         #y = y.squeeze(dim=-1).to(torch.int)
@@ -647,103 +662,210 @@ def main():
         cfg_scale = torch.tensor([4.0])
         cfg_scale_cond = cfg_scale.expand(x.shape[0]).to(device=device)
 
-        # if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-        #     raw_x = model.module.unpatchify(x, (H, W))
-        # else:
-        #     raw_x = model.unpatchify(x, (H, W))
-        # with torch.no_grad():
-        #     raw_x = raw_x.to(torch.bfloat16)
-        #     raw_x = vae.decode(raw_x / vae.config.scaling_factor).sample
-        #     raw_x = (raw_x + 1)/2.
-        #     raw_x = preprocess_raw_image(raw_x, args.enc_type)
-        #     raw_x = raw_x.to(torch.float32)
-        with torch.no_grad():
-            raw_x = raw_x / 255.
-            raw_x = preprocess_raw_image(raw_x, args.enc_type)
-            raw_z = encoders[0].forward_features(raw_x)
-            #import pdb; pdb.set_trace()
-            if 'dinov2' in args.enc_type:
-                raw_z_cls = raw_z['x_norm_clstoken']
-                raw_z = raw_z['x_norm_patchtokens']
-            #raw_z2 = encoders2[0].forward_features(raw_x)
+        if args.enc_type is not None:
+            with torch.no_grad():
+                raw_x = raw_x / 255.
+                raw_x = preprocess_raw_image(raw_x, args.enc_type)
+                raw_z = encoders[0].forward_features(raw_x)
+                #import pdb; pdb.set_trace()
+                if 'dinov2' in args.enc_type:
+                    raw_z_cls = raw_z['x_norm_clstoken']
+                    raw_z_data = raw_z['x_norm_patchtokens']
+                #raw_z2 = encoders2[0].forward_features(raw_x)
+        
         loss = 0.0
         proj_loss = 0.0
-        x0 = torch.randn_like(x)
-
+        x_noise = torch.randn_like(x_data)
+        block_idx = 0
+        per_block_idx = 0
         with accelerator.accumulate(model):
             for layer_idx in range(number_of_perflow):
-            
-            #layer_idx = torch.randint(0, number_of_perflow, (1,)).item()
+                if layer_idx in [2, 7]:
+                    per_block_idx = 0
+                    block_idx += 1
+                mod_index = (per_block_idx % per_blocks_list[block_idx]) / (per_blocks_list[block_idx])
+                mod_index_next = ((per_block_idx % per_blocks_list[block_idx]) + 1) / (per_blocks_list[block_idx])
+                per_block_idx += 1
 
-                model_kwargs = dict(y=y, grid=grid.long(), mask=mask, size=size, target_layer_start=layer_idx * number_of_layers_for_perflow, target_layer_end=layer_idx * number_of_layers_for_perflow + number_of_layers_for_perflow)
-                #model_kwargs = dict(y=y, grid=grid.long(), mask=mask, size=size, target_layer_start=(layer_idx-1) * number_of_layers_for_perflow, target_layer_end=(layer_idx-1) * number_of_layers_for_perflow + number_of_layers_for_perflow)
+                if args.multi_scale:
+                    if layer_idx < per_blocks_accum[0]:
+                        x_past = None
 
-                sigma_next = sigmas[layer_idx + 1]
-                if args.overlap:
-                    if layer_idx == 0:
-                        sigma_current = sigmas[layer_idx]
+                        x0 = x_noise.clone()
+                        x = x_data.clone()
+                        HX, WX = H, W
+                        for _ in range(2):
+                            HX = HX//2
+                            WX = WX//2
+                            x0 = torch.nn.functional.interpolate(x0, size=(HX, WX), mode='bilinear') * 2
+                            x = torch.nn.functional.interpolate(x, size=(HX, WX), mode='bilinear')
+                        x = x.reshape(x.shape[0], -1, n_patch_h//4, patch_size, n_patch_w//4, patch_size)
+                        x = rearrange(x, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+                        x = x.permute(0, 2, 1)
+                        x0 = x0.reshape(x0.shape[0], -1, n_patch_h//4, patch_size, n_patch_w//4, patch_size)
+                        x0 = rearrange(x0, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+                        x0 = x0.permute(0, 2, 1)
+
+                        start_idx = 0
+                        end_idx = 1
+                        start_sigma = sigmas[start_idx]
+                        end_sigma = sigmas[end_idx]
+
+                        x_start = x0.clone()
+                        ratio_end = end_sigma.clone()
+                        while len(ratio_end.shape) < x0.ndim:
+                            ratio_end = ratio_end.unsqueeze(-1)
+                        x_end = x0 * (1-ratio_end) + x * ratio_end
+
+                        if args.enc_type is not None:
+                            raw_z = rearrange(raw_z_data, 'b (h w) c -> b c h w', h=n_patch_h, w=n_patch_w)
+                            #raw_z = rearrange(raw_z, 'b h w c -> b c h w')
+                            raw_z = torch.nn.functional.interpolate(raw_z, size=(n_patch_h//4, n_patch_w//4), mode='bilinear')
+                            raw_z = rearrange(raw_z, 'b c h w -> b (h w) c', h=n_patch_h//4, w=n_patch_w//4)
+
+                    elif per_blocks_accum[0] <= layer_idx < per_blocks_accum[1]:
+                    #if layer_idx < number_of_perflow//2:
+                        x_past = x_data.clone()
+                        HX, WX = H, W
+                        for _ in range(2):
+                            HX = HX//2
+                            WX = WX//2
+                            x_past = torch.nn.functional.interpolate(x_past, size=(HX, WX), mode='bilinear')
+                        x_past = torch.nn.functional.interpolate(x_past, size=(H//2, W//2), mode='nearest')
+                        x_past = x_past.reshape(x_past.shape[0], -1, n_patch_h//2, patch_size, n_patch_w//2, patch_size)
+                        x_past = rearrange(x_past, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+                        x_past = x_past.permute(0, 2, 1)
+                        #x_past = None
+                        
+                        x = torch.nn.functional.interpolate(x_data, size=(H//2, W//2), mode='bilinear')
+                        x = x.reshape(x.shape[0], -1, n_patch_h//2, patch_size, n_patch_w//2, patch_size)
+                        x = rearrange(x, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+                        x = x.permute(0, 2, 1)
+
+                        x0 = torch.nn.functional.interpolate(x_noise, size=(H//2, W//2), mode='bilinear') * 2
+                        x0 = x0.reshape(x_noise.shape[0], -1, n_patch_h//2, patch_size, n_patch_w//2, patch_size)
+                        x0 = rearrange(x0, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+                        x0 = x0.permute(0, 2, 1)
+
+                        start_idx = 1
+                        end_idx = 2
+                        start_sigma = sigmas[start_idx]
+                        ori_sigma = start_sigma
+                        gamma = 1/3
+                        corrected_sigma = (1 / (math.sqrt(1 + (1 / gamma)) * (1 - ori_sigma) + ori_sigma)) * ori_sigma
+                        start_sigma = corrected_sigma
+
+                        end_sigma = sigmas[end_idx]
+
+                        ratio_start = start_sigma.clone()
+                        while len(ratio_start.shape) < x0.ndim:
+                            ratio_start = ratio_start.unsqueeze(-1)
+                        x_start = x0 * (1-ratio_start) + x_past * ratio_start
+
+                        ratio_end = end_sigma.clone()
+                        while len(ratio_end.shape) < x0.ndim:
+                            ratio_end = ratio_end.unsqueeze(-1)
+                        x_end = x0 * (1-ratio_end) + x * ratio_end
+                            
+
+                        if args.enc_type is not None:
+                            raw_z = rearrange(raw_z_data, 'b (h w) c -> b c h w', h=n_patch_h, w=n_patch_w)
+                            #raw_z = rearrange(raw_z, 'b h w c -> b c h w')
+                            raw_z = torch.nn.functional.interpolate(raw_z, size=(n_patch_h//2, n_patch_w//2), mode='bilinear')
+                            raw_z = rearrange(raw_z, 'b c h w -> b (h w) c', h=n_patch_h//2, w=n_patch_w//2)
+
                     else:
-                        sigma_current = sigmas[layer_idx] - 1/(number_of_perflow*2)
-                else:
-                    sigma_current = sigmas[layer_idx]
+                        x_past = torch.nn.functional.interpolate(x_data, size=(H//2, W//2), mode='bilinear')
+                        x_past = torch.nn.functional.interpolate(x_past, size=(H, W), mode='nearest')
+                        x_past = x_past.reshape(x_past.shape[0], -1, n_patch_h, patch_size, n_patch_w, patch_size)
+                        x_past = rearrange(x_past, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+                        x_past = x_past.permute(0, 2, 1)
 
-                if args.random_perflow_step:
-                    perflow_solver_step = torch.randint(1, solver_step+1, (1,)).item()
-                else:
-                    perflow_solver_step = solver_step
+                        x = x_data.reshape(x_data.shape[0], -1, n_patch_h, patch_size, n_patch_w, patch_size)
+                        x = rearrange(x, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+                        x = x.permute(0, 2, 1)
+                        x0 = x_noise.reshape(x_noise.shape[0], -1, n_patch_h, patch_size, n_patch_w, patch_size)
+                        x0 = rearrange(x0, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+                        x0 = x0.permute(0, 2, 1)
+
+                        start_idx = 2
+                        start_sigma = sigmas[start_idx]
+                        ori_sigma = start_sigma
+                        gamma = 1/3
+                        corrected_sigma = (1 / (math.sqrt(1 + (1 / gamma)) * (1 - ori_sigma) + ori_sigma)) * ori_sigma
+                        start_sigma = corrected_sigma
+                        end_sigma = sigmas[-1]
+                        
+                        ratio_start = start_sigma.clone()
+                        while len(ratio_start.shape) < x0.ndim:
+                            ratio_start = ratio_start.unsqueeze(-1)
+                        x_start = x0 * (1-ratio_start) + x_past * ratio_start
+                        x_end = x.clone()
+
+                        if args.enc_type is not None:
+                            raw_z = raw_z_data
+
+                ratio_start = torch.tensor(mod_index).to(device=device)
+                while len(ratio_start.shape) < x0.ndim:
+                    ratio_start = ratio_start.unsqueeze(-1)
+                xt_input = x_start * (1-ratio_start) + x_end * ratio_start
+                ratio_end = torch.tensor(mod_index_next).to(device=device)
+                while len(ratio_end.shape) < x0.ndim:
+                    ratio_end = ratio_end.unsqueeze(-1)
+                xt = x_start * (1-ratio_end) + x_end * ratio_end
+
+                model_kwargs = dict(y=y, target_layer_start=layer_idx * number_of_layers_for_perflow, target_layer_end=layer_idx * number_of_layers_for_perflow + number_of_layers_for_perflow)
+            
+                sigma_current = start_sigma + (end_sigma - start_sigma) * torch.tensor(mod_index).to(device=device)
+                sigma_next = start_sigma + (end_sigma - start_sigma) * torch.tensor(mod_index_next).to(device=device)
                 
-                sigma_list = torch.linspace(sigma_current.item(), sigma_next.item(), perflow_solver_step+1)
+                #import pdb; pdb.set_trace()
+                #sigma_list = torch.linspace(sigma_current.item(), sigma_next.item(), perflow_solver_step+1)
 
-                ratio = sigma_current.clone()
-                while len(ratio.shape) < x0.ndim:
-                    ratio = ratio.unsqueeze(-1)
-                xt = x0 * (1-ratio) + x * ratio
+                # ratio = sigma_current.clone()
+                # while len(ratio.shape) < x0.ndim:
+                #     ratio = ratio.unsqueeze(-1)
+                # xt = x0 * (1-ratio) + x * ratio
 
-                if args.distillation:
-                    with torch.no_grad():
-                        y_null = torch.tensor([1000] * x.shape[0], device=device)
-                        y_cfg = torch.cat([y, y_null], dim=0)
-                        grid_cfg = torch.cat([grid, grid], dim=0)
-                        mask_cfg = torch.cat([mask, mask], dim=0)
-                        size_cfg = torch.cat([size, size], dim=0)
-                        model_kwargs_cfg = dict(y=y_cfg, grid=grid_cfg.long(), mask=mask_cfg, size=size_cfg)
+                # if args.distillation:
+                #     with torch.no_grad():
+                #         y_null = torch.tensor([1000] * x.shape[0], device=device)
+                #         y_cfg = torch.cat([y, y_null], dim=0)
+                #         grid_cfg = torch.cat([grid, grid], dim=0)
+                #         mask_cfg = torch.cat([mask, mask], dim=0)
+                #         size_cfg = torch.cat([size, size], dim=0)
+                #         model_kwargs_cfg = dict(y=y_cfg, grid=grid_cfg.long(), mask=mask_cfg, size=size_cfg)
 
-                        for i in range(solver_step):
-                            #sigma_previous_i = sigma_list[i-1]
-                            sigma_current_i = sigma_list[i]
-                            sigma_next_i = sigma_list[i+1]
-                            t_cfg = sigma_current_i.repeat(x.shape[0]*2).to(device=device)
-                            x_input = torch.cat([xt, xt], dim=0)
-                            model_output = pretrained_model(x_input, t_cfg, **model_kwargs_cfg)
+                #         for i in range(solver_step):
+                #             #sigma_previous_i = sigma_list[i-1]
+                #             sigma_current_i = sigma_list[i]
+                #             sigma_next_i = sigma_list[i+1]
+                #             t_cfg = sigma_current_i.repeat(x.shape[0]*2).to(device=device)
+                #             x_input = torch.cat([xt, xt], dim=0)
+                #             model_output = pretrained_model(x_input, t_cfg, **model_kwargs_cfg)
 
-                            C_cfg = 3 * 2 * 2
-                            noise_pred_cond, noise_pred_uncond = model_output.chunk(2, dim=0)
-                            noise_pred = noise_pred_uncond + cfg_scale.to(device=device) * (noise_pred_cond - noise_pred_uncond)
-                            xt = xt + (sigma_next_i - sigma_current_i) * noise_pred
+                #             C_cfg = 3 * 2 * 2
+                #             noise_pred_cond, noise_pred_uncond = model_output.chunk(2, dim=0)
+                #             noise_pred = noise_pred_uncond + cfg_scale.to(device=device) * (noise_pred_cond - noise_pred_uncond)
+                #             xt = xt + (sigma_next_i - sigma_current_i) * noise_pred
 
-                else:
-                    ratio_next = sigma_next.clone()
-                    while len(ratio_next.shape) < x0.ndim:
-                        ratio_next = ratio_next.unsqueeze(-1)
-                    xt = x0 * (1-ratio_next) + x * ratio_next
+                # else:
+                #     ratio_next = sigma_next.clone()
+                #     while len(ratio_next.shape) < x0.ndim:
+                #         ratio_next = ratio_next.unsqueeze(-1)
+                #     xt = x0 * (1-ratio_next) + x * ratio_next
 
                 if args.reflow:
-                    xt_input = x0 * (1-ratio) + x * ratio
                     per_flow_ratio = torch.randint(0, 1000, (x.shape[0],)) / 1000
-                    #per_flow_ratio = torch.rand(x.shape[0]).to(device=device)
                     per_flow_ratio = per_flow_ratio.to(device=device)
+                    #per_flow_ratio = torch.rand(x.shape[0]).to(device=device)
                     t_input = sigma_current + per_flow_ratio.clone() * (sigma_next - sigma_current)
                     while len(per_flow_ratio.shape) < x0.ndim:
                         per_flow_ratio = per_flow_ratio.unsqueeze(-1)
                     x_input = xt_input * (1-per_flow_ratio) + xt * per_flow_ratio
                     target = (xt - xt_input) / (sigma_next - sigma_current)
-                    weight = 1.
-                else:
-                    x_input = x0 * (1-ratio) + x * ratio
-                    target = (xt - x_input) / (sigma_next - sigma_current)  
-                    t_input = sigma_current.repeat(x.shape[0]).to(device=device)
-                    weight = 1.
-
+                    weight = 1 #/ (sigma_next - sigma_current)
+                
                 if diffusion_cfg.distillation_network_config.params.fourier_basis:
                     t_next = sigma_next.repeat(x.shape[0]).to(device=device)
                 else:
@@ -755,9 +877,9 @@ def main():
                 with accelerator.autocast():
                     _, _ = get_flexible_mask_and_ratio(model_kwargs, x)
                     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                        pred_model, representation_linear, representation_linear_cls, representation_linear_jepa = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                        pred_model, representation_linear, representation_linear_cls = model.module.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
                     else:
-                        pred_model, representation_linear, representation_linear_cls, representation_linear_jepa = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
+                        pred_model, representation_linear, representation_linear_cls = model.forward_run_layer(x_input, t_input, cfg_scale_cond, **model_kwargs, t_next=t_next)
 
                 losses = mean_flat((((pred_model - target)) ** 2)) * weight
                 loss += losses.mean()
@@ -765,58 +887,31 @@ def main():
                 if args.enc_type is not None:
                     proj_loss_per = 0.0
                     #if layer_idx <= int(number_of_perflow/2):
-                    if 1:
-                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z)):
-                            raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
-                            repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
-                            proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                    # representation_linear : B N C
+                    # raw_z : B N C
+                    for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z)):
+                        raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
+                        repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
+                        proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
                         
-                        #proj_loss_per += 0.1 * mean_flat((representation_linear - raw_z)**2).sum()
+                        if args.structured_loss:
+                            # Add structure loss
+                            # Calculate similarity matrices for both representations
+                            raw_sim_matrix = torch.matmul(raw_z_j, raw_z_j.transpose(-2, -1))  # [B, N, N]
+                            rep_sim_matrix = torch.matmul(repre_j, repre_j.transpose(-2, -1))  # [B, N, N]
+                            
+                            # Remove diagonal elements (self-similarity) as they're trivial
+                            eye_mask = 1.0 - torch.eye(repre_j.shape[0], device=repre_j.device)
+                            raw_sim_matrix = raw_sim_matrix * eye_mask
+                            rep_sim_matrix = rep_sim_matrix * eye_mask
+                            
+                            # Structure loss: MSE between similarity matrices
+                            # This preserves the relative similarities between samples
+                            #structure_loss = torch.nn.functional.mse_loss(rep_sim_matrix, raw_sim_matrix)
+                            structure_loss = torch.norm(rep_sim_matrix - raw_sim_matrix, p='fro') / (rep_sim_matrix.size(0) * rep_sim_matrix.size(1))
+                            proj_loss_per += structure_loss  # MSE structure loss
                         
-                        # for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_cls, raw_z_cls)):
-                        #     raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
-                        #     repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
-                        #     proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
-                        
-                        # proj_loss_per += 0.1 * mean_flat((representation_linear_cls - raw_z_cls)**2).sum()
-                    else:
-                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_jepa, raw_z2)):
-                            raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
-                            repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
-                            proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
-
-                        #proj_loss_per += 0.1 * mean_flat((representation_linear_jepa - raw_z2)**2).sum()
-
-                        for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear_cls, raw_z_cls)):
-                            raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
-                            repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
-                            proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
-                        
-                        #proj_loss_per += 0.1 * mean_flat((representation_linear_cls - raw_z_cls)**2).sum()
                     proj_loss += proj_loss_per / raw_z.shape[0]
-
-                if args.consistency_loss:
-                    xt_plus = x0 * (1-ratio_next) + x * ratio_next
-                    xt_current = x0 * (1-ratio) + x * ratio
-                    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                        pred_model_xt = model.module.forward_run_layer_from_target_layer(xt_current, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx)
-                        
-                        if layer_idx == number_of_perflow - 1:
-                            pred_model_xt_plus = x
-                        else:
-                            with torch.no_grad():
-                                pred_model_xt_plus = model.module.forward_run_layer_from_target_layer(xt_plus, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx+1).detach()
-                    else:
-                        pred_model_xt = model.forward_run_layer_from_target_layer(xt_current, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx)
-
-                        if layer_idx == number_of_perflow - 1:
-                            pred_model_xt_plus = x
-                        else:
-                            with torch.no_grad():
-                                pred_model_xt_plus = model.forward_run_layer_from_target_layer(xt_plus, t_input, cfg_scale_cond, y, grid.long(), mask, size, target_start_idx=layer_idx+1).detach()
-
-                    loss_consistency = mean_flat((((pred_model_xt_plus - pred_model_xt)) ** 2)) * weight
-                    loss += loss_consistency.mean()
 
             # Backpropagate
             loss = loss / number_of_perflow
@@ -833,7 +928,8 @@ def main():
             # Gather the losses across all processes for logging (if we use distributed training).
             avg_loss = accelerator.gather(loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
             train_loss += avg_loss.item() / grad_accu_steps
-            avg_proj_loss = accelerator.gather(proj_loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
+            if args.enc_type is not None:
+                avg_proj_loss = accelerator.gather(proj_loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
 
         # Checks if the accelerator has performed an optimization step behind the scenes; Check gradient accumulation
         if accelerator.sync_gradients: 
@@ -885,28 +981,16 @@ def main():
                 logger.info(f"Saved state to {save_path}")
                 accelerator.wait_for_everyone()
             
-            if global_steps % accelerate_cfg.evaluation_steps == 0 and accelerator.is_main_process:
+            if global_steps % accelerate_cfg.evaluation_steps == 0:
                 ema_model.eval()
                 with torch.no_grad():
                     # prepare for x
-                    grid_h = torch.arange(n_patch_h, dtype=torch.long)
-                    grid_w = torch.arange(n_patch_w, dtype=torch.long)
-                    grid_test = torch.meshgrid(grid_w, grid_h, indexing='xy')
-                    grid_test = torch.cat(
-                        [grid_test[0].reshape(1,-1), grid_test[1].reshape(1,-1)], dim=0
-                    ).repeat(test_batch_size,1,1).to(device=device, dtype=torch.long)
-                    mask_test = torch.ones(test_batch_size, n_patch_h*n_patch_w).to(device=device, dtype=torch.bfloat16)
-                    size_test = torch.tensor((n_patch_h, n_patch_w)).repeat(test_batch_size,1).to(device=device, dtype=torch.long)
-                    size_test = size_test[:, None, :]
-
-                    model_kwargs_test = dict(y=y_test, grid=grid_test.long(), mask=mask_test, size=size_test)
-
-                    cfg_scale_test = 4 * torch.ones(1)
+                    cfg_scale_test = torch.ones(1)
                     cfg_scale_cond_test = cfg_scale_test.expand(noise_test.shape[0]).to(device=device)
                     t_test = torch.zeros_like(cfg_scale_cond_test)
 
                     with accelerator.autocast():
-                        output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, **model_kwargs_test, noise=noise_test_list)
+                        output_test = ema_model(noise_test, t_test, cfg_scale_cond_test, y=y_test, noise=noise_test_list, representation_noise=noise_test)
 
                     samples = output_test[..., : n_patch_h*n_patch_w]
                     if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
@@ -916,80 +1000,54 @@ def main():
                     samples = samples.to(torch.bfloat16)     
                     samples = vae.decode(samples / vae.config.scaling_factor).sample
                     samples = samples.clamp(-1, 1)
-                    torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}.jpg"), normalize=True, scale_each=True)
-                    # samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
+                    if accelerator.is_main_process:
+                        torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}.jpg"), normalize=True, scale_each=True)
                     
-                    # if accelerator.is_main_process:
-                    #     for i, img_tensor in enumerate(samples):
-                    #         img = Image.fromarray(img_tensor.cpu().numpy())
-                    #         img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-{i}.jpg"))
-                    
-                    with accelerator.autocast():
-                        if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list)
+                    for nfe in [2, 6]:
+                        with accelerator.autocast():
+                            if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
+                                output_test = ema_model.module.forward_cfg(noise_test, t_test, 3, number_of_step_perflow=nfe, y=y_test, noise=noise_test_list, representation_noise=noise_test)
+                            else:
+                                output_test = ema_model.forward_cfg(noise_test, t_test, 3, number_of_step_perflow=nfe, y=y_test, noise=noise_test_list, representation_noise=noise_test)
+
+                        samples = output_test[:, : n_patch_h*n_patch_w]
+                        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                            samples = model.module.unpatchify(samples, (H, W))
                         else:
-                            output_test = ema_model.forward_cfg(noise_test, t_test, 2, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list)
-
-                    samples = output_test[..., : n_patch_h*n_patch_w]
-                    if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                        samples = ema_model.module.unpatchify(samples, (H, W))
-                    else:
-                        samples = ema_model.unpatchify(samples, (H, W))
-                    samples = samples.to(torch.bfloat16)     
-                    samples = vae.decode(samples / vae.config.scaling_factor).sample
-                    samples = samples.clamp(-1, 1)
-                    torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-NFE10-15.jpg"), normalize=True, scale_each=True)
-
-                    # CFG Sampling
-                    with accelerator.autocast():
-                        if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                            output_test = ema_model.module.forward_cfg(noise_test, t_test, 3, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list)
-                        else:
-                            output_test = ema_model.forward_cfg(noise_test, t_test, 3, **model_kwargs_test, number_of_step_perflow=6, noise=noise_test_list)
-
-                    samples = output_test[..., : n_patch_h*n_patch_w]
-                    if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                        samples = ema_model.module.unpatchify(samples, (H, W))
-                    else:
-                        samples = ema_model.unpatchify(samples, (H, W))
-                    samples = samples.to(torch.bfloat16)     
-                    samples = vae.decode(samples / vae.config.scaling_factor).sample
-                    samples = samples.clamp(-1, 1)
-                    torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-NFE10.jpg"), normalize=True, scale_each=True)
-                    # samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
-                    
-                    # if accelerator.is_main_process:
-                    #     for i, img_tensor in enumerate(samples):
-                    #         img = Image.fromarray(img_tensor.cpu().numpy())
-                    #         img.save(os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-{i}-NFE10.jpg"))
+                            samples = model.unpatchify(samples, (H, W))
+                            
+                        samples = samples.to(torch.bfloat16)     
+                        samples = vae.decode(samples / vae.config.scaling_factor).sample
+                        samples = samples.clamp(-1, 1)
+                        if accelerator.is_main_process:
+                            torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-NFE{nfe}.jpg"), normalize=True, scale_each=True)
             
-            if args.eval_fid and global_steps % accelerate_cfg.eval_fid_steps == 0 and global_steps > 0 and accelerator.is_main_process:
+            if args.eval_fid and global_steps % accelerate_cfg.eval_fid_steps == 0 and global_steps > 0:
                 with torch.no_grad():
                     number = 0
                     arr_list = []
-                    test_fid_batch_size = 25
-
-                    grid_h = torch.arange(n_patch_h, dtype=torch.long)
-                    grid_w = torch.arange(n_patch_w, dtype=torch.long)
-                    grid_test = torch.meshgrid(grid_w, grid_h, indexing='xy')
-                    grid_test = torch.cat(
-                        [grid_test[0].reshape(1,-1), grid_test[1].reshape(1,-1)], dim=0
-                    ).repeat(test_fid_batch_size,1,1).to(device=device, dtype=torch.long)
-                    mask_test = torch.ones(test_fid_batch_size, n_patch_h*n_patch_w).to(device=device, dtype=torch.bfloat16)
-                    size_test = torch.tensor((n_patch_h, n_patch_w)).repeat(test_fid_batch_size,1).to(device=device, dtype=torch.long)
-                    size_test = size_test[:, None, :]
+                    test_fid_batch_size = accelerate_cfg.test_fid_batch_size
 
                     while args.eval_fid_num_samples > number:
-                        latents = torch.randn((test_fid_batch_size, n_patch_h*n_patch_w, (2**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
+                        if args.multi_scale:
+                            latents = torch.randn((test_fid_batch_size, diffusion_cfg.distillation_network_config.params.in_channels, H, W)).to(device=device)
+                            HX, WX = H, W
+                            for _ in range(2):
+                                HX = HX//2
+                                WX = WX//2
+                                latents = torch.nn.functional.interpolate(latents, size=(HX, WX), mode='bilinear') * 2
+                            latents = latents.reshape(test_fid_batch_size, -1, n_patch_h//4, patch_size, n_patch_w//4, patch_size)
+                            latents = rearrange(latents, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+                            latents = latents.permute(0, 2, 1)
+                        else:
+                            latents = torch.randn((test_fid_batch_size, n_patch_h*n_patch_w, (patch_size**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
                         y = torch.randint(0, 1000, (test_fid_batch_size,), device=device)
-
-                        model_kwargs_fid = dict(y=y, grid=grid_test.long(), mask=mask_test, size=size_test)
 
                         with accelerator.autocast():
                             if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                                output_test = ema_model.module.forward_cfg(latents, t_test, 1.5, **model_kwargs_fid, number_of_step_perflow=5)
+                                output_test = ema_model.module.forward_cfg(latents, t_test, accelerate_cfg.test_cfg_scale, number_of_step_perflow=accelerate_cfg.test_nfe, y=y, representation_noise=latents)
                             else:
-                                output_test = ema_model.forward_cfg(latents, t_test, 1.5, **model_kwargs_fid, number_of_step_perflow=5)
+                                output_test = ema_model.forward_cfg(latents, t_test, accelerate_cfg.test_cfg_scale, number_of_step_perflow=accelerate_cfg.test_nfe, y=y, representation_noise=latents)
 
                         samples = output_test[:, : n_patch_h*n_patch_w]
                         if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
@@ -1005,23 +1063,23 @@ def main():
                         number += arr.shape[0]
                     
                     arr_list = np.concatenate(arr_list, axis=0)
-                    #if accelerator.is_main_process:
-                    sample_acts, sample_stats, sample_stats_spatial = calculate_inception_stats_imagenet(arr_list, evaluator)
-                    inception_score = evaluator.compute_inception_score(sample_acts[0])
-                    fid = sample_stats.frechet_distance(ref_stats)
-                    sfid = sample_stats_spatial.frechet_distance(ref_stats_spatial)
-                    prec, recall = evaluator.compute_prec_recall(ref_acts[0], sample_acts[0])
-                    logger.info(f"Inception Score: {inception_score}")
-                    logger.info(f"FID: {fid}")
-                    logger.info(f"Spatial FID: {sfid}")
-                    logger.info(f"Precision: {prec}")
-                    logger.info(f"Recall: {recall}")
-                    if getattr(accelerate_cfg, 'logger', 'wandb') != None:
-                        accelerator.log({"inception_score": inception_score}, step=global_steps)
-                        accelerator.log({"fid": fid}, step=global_steps)
-                        accelerator.log({"sfid": sfid}, step=global_steps)
-                        accelerator.log({"prec": prec}, step=global_steps)
-                        accelerator.log({"recall": recall}, step=global_steps)
+                    if accelerator.is_main_process:
+                        sample_acts, sample_stats, sample_stats_spatial = calculate_inception_stats_imagenet(arr_list, evaluator)
+                        inception_score = evaluator.compute_inception_score(sample_acts[0])
+                        fid = sample_stats.frechet_distance(ref_stats)
+                        sfid = sample_stats_spatial.frechet_distance(ref_stats_spatial)
+                        prec, recall = evaluator.compute_prec_recall(ref_acts[0], sample_acts[0])
+                        logger.info(f"Inception Score: {inception_score}")
+                        logger.info(f"FID: {fid}")
+                        logger.info(f"Spatial FID: {sfid}")
+                        logger.info(f"Precision: {prec}")
+                        logger.info(f"Recall: {recall}")
+                        if getattr(accelerate_cfg, 'logger', 'wandb') != None:
+                            accelerator.log({"inception_score": inception_score}, step=global_steps)
+                            accelerator.log({"fid": fid}, step=global_steps)
+                            accelerator.log({"sfid": sfid}, step=global_steps)
+                            accelerator.log({"prec": prec}, step=global_steps)
+                            accelerator.log({"recall": recall}, step=global_steps)
                 torch.cuda.empty_cache()
             accelerator.wait_for_everyone()
 

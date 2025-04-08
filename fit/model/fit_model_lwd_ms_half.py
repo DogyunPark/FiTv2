@@ -1,4 +1,5 @@
 import torch
+import math
 import torch.nn as nn
 from functools import partial
 from typing import Optional
@@ -71,6 +72,7 @@ class FiTLwD(nn.Module):
         n_patch_h: int = 16,
         n_patch_w: int = 16,
         multi_scale: bool = False,
+        down_scale_factor: int = 1,
         **kwargs,
     ):
         super().__init__()
@@ -110,7 +112,7 @@ class FiTLwD(nn.Module):
                 hidden_size, num_heads, mlp_ratio=mlp_ratio, swiglu=use_swiglu, swiglu_large=use_swiglu_large,
                 rel_pos_embed=rel_pos_embed, add_rel_pe_to_v=add_rel_pe_to_v, norm_layer=norm_type, 
                 q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight, qkv_bias=qkv_bias, ffn_bias=ffn_bias,
-                adaln_bias=adaln_bias, adaln_type=adaln_type, adaln_lora_dim=adaln_lora_dim
+                adaln_bias=adaln_bias, adaln_type='normal', adaln_lora_dim=adaln_lora_dim
             ) for _ in range(number_of_representation_blocks)])
             self.linear_projection = nn.Sequential(
                     nn.Linear(hidden_size, 2048),
@@ -126,13 +128,6 @@ class FiTLwD(nn.Module):
             #         nn.SiLU(),
             #         nn.Linear(2048, 1024),
             #     )
-            # self.linear_projection_jepa = nn.Sequential(
-            #         nn.Linear(hidden_size, 2048),
-            #         nn.SiLU(),
-            #         nn.Linear(2048, 2048),
-            #         nn.SiLU(),
-            #         nn.Linear(2048, 1280),
-            #     )
 
         if number_of_shared_blocks > 0:
             self.start_shared_blocks = nn.ModuleList([FiTBlock(
@@ -147,14 +142,7 @@ class FiTLwD(nn.Module):
         else:
             self.x_embedder = PatchEmbedder(in_channels * patch_size**2, hidden_size, bias=True)
         
-        # if perlayer_embedder:
-        #     self.t_embedder = nn.ModuleList([TimestepEmbedder(hidden_size) for _ in range(number_of_perflow)])
-        # else:
         self.t_embedder = TimestepEmbedder(hidden_size)
-        
-        # if perlayer_embedder:
-        #     self.y_embedder = nn.ModuleList([LabelEmbedder(num_classes, hidden_size, class_dropout_prob) for _ in range(number_of_perflow)])
-        # else:
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
 
         if fourier_basis:
@@ -228,28 +216,13 @@ class FiTLwD(nn.Module):
             nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
             nn.init.constant_(self.x_embedder.proj.bias, 0)
 
-        # Initialize label embedding table:
-        # if self.perlayer_embedder:
-        #     for i, embedder in enumerate(self.y_embedder):
-        #         nn.init.normal_(embedder.embedding_table.weight, std=0.02)
-        # else:
         nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
-
-        # Initialize timestep embedding MLP:
-        # if self.perlayer_embedder:
-        #     for i, embedder in enumerate(self.t_embedder):
-        #         nn.init.normal_(embedder.mlp[0].weight, std=0.02)
-        #         nn.init.normal_(embedder.mlp[2].weight, std=0.02)
-        # else:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
         if self.fourier_basis is not None:
             nn.init.normal_(self.fourier_basis.mlp[0].weight, std=0.02)
             nn.init.normal_(self.fourier_basis.mlp[2].weight, std=0.02)
-
-        #nn.init.normal_(self.c_embedder.mlp[0].weight, std=0.02)
-        #nn.init.normal_(self.c_embedder.mlp[2].weight, std=0.02)
 
         # Zero-out adaLN modulation layers in DiT blocks:
         for block in self.blocks:
@@ -313,6 +286,7 @@ class FiTLwD(nn.Module):
         block_number = bs * ch * (height // 2) * (width // 2)
         noise = torch.stack([dist.sample() for _ in range(block_number)]) # [block number, 4]
         noise = rearrange(noise, '(b c h w) (p q) -> b c (h p) (w q)',b=bs,c=ch,h=height//2,w=width//2,p=2,q=2)
+        #noise = rearrange(noise, 'b c n -> b n c')
         return noise
 
     def forward(self, x, t, cfg, y, number_of_step_perflow=1, noise=None, representation_noise=None):
@@ -339,10 +313,11 @@ class FiTLwD(nn.Module):
             freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
         
         if self.multi_scale:
-            multi_scale_index_list = [self.number_of_layers_for_perflow//3, 2*(self.number_of_layers_for_perflow//3)]
-            
+            multi_scale_index_list = [int(self.number_of_perflow//3), int(2*(self.number_of_perflow//3))]
+            #multi_scale_index_list = [int(self.number_of_perflow//2)]
+
             grid, mask, size = make_grid_mask_size(x.shape[0], self.n_patch_h//4, self.n_patch_w//4, self.patch_size, x.device)
-            freqs_cos, freqs_sin = self.rel_pos_embed.online_get_2d_rope_from_grid(grid, size)
+            freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
             freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
             h, w = (self.n_patch_h*self.patch_size)//4, (self.n_patch_w*self.patch_size)//4
 
@@ -361,23 +336,31 @@ class FiTLwD(nn.Module):
                     x = self.unpatchify(x, (h, w))
                     h *= 2; w *= 2
                     x = torch.nn.functional.interpolate(x, (h, w), mode='nearest')
-                    ori_sigma = 1 - sigma_current   # the original coeff of signal
+                    #x = rearrange(x, 'b c h w -> b (h w) c', h=h, w=w)
+                    ori_sigma = sigma_current   # the original coeff of signal
                     gamma = 1/3
                     alpha = 1 / (math.sqrt(1 + (1 / gamma)) * (1 - ori_sigma) + ori_sigma)
                     beta = alpha * (1 - ori_sigma) / math.sqrt(gamma)
+                    corrected_sigma = (1 / (math.sqrt(1 + (1 / gamma)) * (1 - ori_sigma) + ori_sigma)) * ori_sigma
+                    sigma_current = corrected_sigma
+                    #import pdb; pdb.set_trace()
 
-                    bs, ch, _, _ = x.shape
-                    noise = self.sample_block_noise(bs, ch, h, w)
+                    bs, ch, hx, wx = x.shape
+                    noise = self.sample_block_noise(bs, ch, hx, wx)
                     noise = noise.to(device=x.device, dtype=x.dtype)
                     x = alpha * x + beta * noise
 
-                    grid, mask, size = make_grid_mask_size_online(x, self.patch_size, x.device)
-                    freqs_cos, freqs_sin = self.rel_pos_embed.online_get_2d_rope_from_grid(grid, size)
+                    #grid2, mask, size = make_grid_mask_size_online(x, self.patch_size, x.device)
+                    grid, mask, size = make_grid_mask_size(x.shape[0], h//self.patch_size, w//self.patch_size, self.patch_size, x.device)
+                    grid = grid.contiguous()
+                    mask = mask.contiguous()
+                    freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
                     freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
-
-                    x = x.reshape(bs, -1, h//self.patch_size, self.patch_size, w//self.patch_size, self.patch_size)
+                    #x = rearrange(x, 'b c h w -> b (h w) c', h=h, w=w)
+                    x = x.reshape(bs, -1, h//self.patch_size, self.patch_size, w//self.patch_size, self.patch_size).contiguous()
                     x = rearrange(x, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
-                    x = x.permute(0, 2, 1)
+                    x = x.permute(0, 2, 1).contiguous()
+
 
             sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
 
@@ -465,7 +448,7 @@ class FiTLwD(nn.Module):
         grid, mask, size = make_grid_mask_size_online(x, self.patch_size, x.device)
         # get RoPE frequences in advance, then calculate attention.
          
-        freqs_cos, freqs_sin = self.rel_pos_embed.online_get_2d_rope_from_grid(grid, size)
+        freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
         freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
 
         t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
@@ -479,7 +462,9 @@ class FiTLwD(nn.Module):
         # if self.perlayer_embedder:
         #     y = self.y_embedder[target_layer_start // self.number_of_layers_for_perflow](y, self.training)           # (B, D)
         # else:
-        y = self.y_embedder(y, self.training)           # (B, D)
+        y_null = self.y_embedder(y, self.training)           # (B, D)
+        y = self.y_embedder(y, False)           # (B, D)
+        c_null = t + y_null
         c = t + y
 
         if self.fourier_basis is not None:
@@ -489,6 +474,7 @@ class FiTLwD(nn.Module):
             cos_basis = cos_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
             sin_basis = sin_basis.unsqueeze(1).expand(-1, x.shape[1], -1)
         
+        #import pdb; pdb.set_trace()
         if self.number_of_representation_blocks > 1:
             #assert representation_noise is not None, "representation_noise must be provided when representation_blocks > 1"
             
@@ -497,9 +483,9 @@ class FiTLwD(nn.Module):
             #representation_noise = representation_noise + self.pos_embed
             for rep_block in self.representation_blocks:
                 if not self.use_checkpoint:
-                    representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin)
+                    representation_noise = rep_block(representation_noise, c_null, mask, freqs_cos, freqs_sin)
                 else:
-                    representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin)
+                    representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c_null, mask, freqs_cos, freqs_sin)
             
             #if 1:
             representation_linear = self.linear_projection(representation_noise)
@@ -557,7 +543,7 @@ class FiTLwD(nn.Module):
             x = rearrange(x, 'B N C -> B C N')
         
         if self.number_of_representation_blocks > 1:
-            return x, representation_linear, None, None
+            return x, representation_linear, None
         else:
             return x, None, None, None
     
@@ -637,7 +623,7 @@ class FiTLwD(nn.Module):
         else:   
             return x
     
-    def forward_cfg(self, x, t, cfg, y, grid, mask, size=None, number_of_step_perflow=1, noise=None, representation_noise=None):
+    def forward_cfg(self, x, t, cfg, y, number_of_step_perflow=1, noise=None, representation_noise=None):
         """
         Forward pass of FiT.
         x: (B, p**2 * C_in, N), tensor of sequential inputs (flattened latent features of images, N=H*W/(p**2))
@@ -650,10 +636,12 @@ class FiTLwD(nn.Module):
         return: (B, p**2 * C_out, N), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
         """
 
-        assert cfg > 1, "cfg must be greater than 1"
+        #assert cfg > 1, "cfg must be greater than 1"
         y_null = torch.tensor([self.num_classes] * x.shape[0], device=x.device)
+        y_null_cat = torch.cat([y, y_null], dim=0)
         y = torch.cat([y, y], dim=0)
-        y_embed = self.y_embedder(y, self.training)           # (B, D)
+        y_embed_null = self.y_embedder(y_null_cat, self.training)           # (B, D)
+        y_embed = self.y_embedder(y, False)           # (B, D)
 
         grid, mask, size = make_grid_mask_size(x.shape[0], self.n_patch_h, self.n_patch_w, self.patch_size, x.device)
         size = torch.cat([size, size], dim=0)
@@ -668,10 +656,14 @@ class FiTLwD(nn.Module):
             freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
         
         if self.multi_scale:
-            multi_scale_index_list = [self.number_of_layers_for_perflow//3, 2*(self.number_of_layers_for_perflow//3)]
-            
+            multi_scale_index_list = [int(self.number_of_perflow//3), int(2*(self.number_of_perflow//3))]
+            #multi_scale_index_list = [int(self.number_of_perflow//2)]
+
             grid, mask, size = make_grid_mask_size(x.shape[0], self.n_patch_h//4, self.n_patch_w//4, self.patch_size, x.device)
-            freqs_cos, freqs_sin = self.rel_pos_embed.online_get_2d_rope_from_grid(grid, size)
+            size = torch.cat([size, size], dim=0)
+            grid = torch.cat([grid, grid], dim=0)
+            mask = torch.cat([mask, mask], dim=0)
+            freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
             freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
             h, w = (self.n_patch_h*self.patch_size)//4, (self.n_patch_w*self.patch_size)//4
 
@@ -683,30 +675,37 @@ class FiTLwD(nn.Module):
                 else:
                     sigma_current = self.sigmas_overlap[i]
             else:
+                sigma_current = self.sigmas[i]
                 if i in multi_scale_index_list:
                     x = self.unpatchify(x, (h, w))
                     h *= 2; w *= 2
                     x = torch.nn.functional.interpolate(x, (h, w), mode='nearest')
-                    ori_sigma = 1 - sigma_current   # the original coeff of signal
+                    #x = rearrange(x, 'b c h w -> b (h w) c', h=h, w=w)
+                    ori_sigma = sigma_current   # the original coeff of signal
                     gamma = 1/3
                     alpha = 1 / (math.sqrt(1 + (1 / gamma)) * (1 - ori_sigma) + ori_sigma)
                     beta = alpha * (1 - ori_sigma) / math.sqrt(gamma)
+                    corrected_sigma = (1 / (math.sqrt(1 + (1 / gamma)) * (1 - ori_sigma) + ori_sigma)) * ori_sigma
+                    sigma_current = corrected_sigma
 
-                    bs, ch, _, _ = x.shape
-                    noise = self.sample_block_noise(bs, ch, h, w)
+                    bs, ch, hx, wx = x.shape
+                    noise = self.sample_block_noise(bs, ch, hx, wx)
                     noise = noise.to(device=x.device, dtype=x.dtype)
                     x = alpha * x + beta * noise
 
-                    grid, mask, size = make_grid_mask_size_online(x, self.patch_size, x.device)
-                    size = torch.cat([size, size], dim=0)
+                    #grid, mask, size = make_grid_mask_size_online(x, self.patch_size, x.device)
+                    grid, mask, size = make_grid_mask_size(x.shape[0], h//self.patch_size, w//self.patch_size, self.patch_size, x.device)
+                    grid = grid.contiguous()
+                    mask = mask.contiguous()
                     grid = torch.cat([grid, grid], dim=0)
                     mask = torch.cat([mask, mask], dim=0)
-                    freqs_cos, freqs_sin = self.rel_pos_embed.online_get_2d_rope_from_grid(grid, size)
+                    size = torch.cat([size, size], dim=0)
+                    freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
                     freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
-
-                    x = x.reshape(bs, -1, h//self.patch_size, self.patch_size, w//self.patch_size, self.patch_size)
+                    #x = rearrange(x, 'b c h w -> b (h w) c', h=h, w=w)
+                    x = x.reshape(bs, -1, h//self.patch_size, self.patch_size, w//self.patch_size, self.patch_size).contiguous()
                     x = rearrange(x, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
-                    x = x.permute(0, 2, 1)
+                    x = x.permute(0, 2, 1).contiguous()
 
             sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
 
@@ -719,6 +718,7 @@ class FiTLwD(nn.Module):
                 # else:
                 t = self.t_embedder(t)
                 c = t + y_embed
+                c_null = t + y_embed_null
 
                 if self.fourier_basis is not None:
                     t_next = self.sigmas[i+1].expand(x.shape[0]).to(x.device)
@@ -739,14 +739,15 @@ class FiTLwD(nn.Module):
                     #representation_noise = representation_noise + self.pos_embed
                     for rep_block in self.representation_blocks:
                         if not self.use_checkpoint:
-                            representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin)
+                            representation_noise = rep_block(representation_noise, c_null, mask, freqs_cos, freqs_sin)
                         else:
-                            representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin)
+                            representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c_null, mask, freqs_cos, freqs_sin)
                     
                     #representation_noise_mean = torch.mean(representation_noise, dim=1)
                     #representation_noise_mean = representation_noise[:, 0, :]
                     #if i <= (len(self.blocks) // self.number_of_layers_for_perflow) // 2:
-                    representation_noise, _ = representation_noise.chunk(2, dim=0)
+                    representation_noise, representation_noise_null = representation_noise.chunk(2, dim=0)
+                    representation_noise = representation_noise_null + 3 * (representation_noise - representation_noise_null)
                     representation_noise = torch.cat([representation_noise, torch.zeros_like(representation_noise)], dim=0)
                     #c = torch.cat([c, representation_noise], dim=1)
                     #c = c + representation_noise_mean

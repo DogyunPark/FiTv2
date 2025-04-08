@@ -48,9 +48,9 @@ from fit.model.fit_model import FiTBlock
 from fit.model.modules import FinalLayer, PatchEmbedder, TimestepEmbedder, LabelEmbedder
 from fit.scheduler.transport.utils import get_flexible_mask_and_ratio, mean_flat
 
-#from came_pytorch import CAME
+from came_pytorch import CAME
 from PIL import Image
-#from elatentlpips import ELatentLPIPS
+from elatentlpips import ELatentLPIPS
 from fit.scheduler.transport.utils import loss_func_huber
 from fit.utils.utils import bell_shaped_sample
 import tensorflow.compat.v1 as tf
@@ -438,7 +438,15 @@ def main():
     
     # Create sample inputs for GFLOPs calculation
     sample_batch_size = 1
-    sample_noise = torch.randn((sample_batch_size, n_patch_h*n_patch_w, (patch_size**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
+    sample_noise = torch.randn((sample_batch_size, diffusion_cfg.distillation_network_config.params.in_channels, H, W)).to(device=device)
+    HX, WX = H, W
+    for _ in range(2):
+        HX = HX//2
+        WX = WX//2
+        sample_noise = torch.nn.functional.interpolate(sample_noise, size=(HX, WX), mode='bilinear') * 2
+    sample_noise = sample_noise.reshape(sample_batch_size, -1, n_patch_h//4, patch_size, n_patch_w//4, patch_size)
+    sample_noise = rearrange(sample_noise, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+    sample_noise = sample_noise.permute(0, 2, 1)
     sample_t = torch.zeros(sample_batch_size).to(device=device)
     sample_y = torch.zeros(sample_batch_size, dtype=torch.int).to(device=device)
     
@@ -468,7 +476,7 @@ def main():
     logger.info(f"Single forward pass GFLOPs: {total_flops/1e9:.4f}")
     torch.cuda.empty_cache()
 
-    for nfe in [1, 2]:
+    for nfe in [2, 4]:
         with torch.no_grad():
             sampling_wrapper = SamplingWrapper(ema_model, nfe)
             sampling_flops = FlopCountAnalysis(sampling_wrapper, sample_noise)
@@ -484,7 +492,15 @@ def main():
     H, W = n_patch_h * patch_size, n_patch_w * patch_size
     print('Generating images with resolution: ', H, 'x', W)
     y_test = torch.randint(0, args.num_classes, (test_batch_size,), device=device)
-    noise_test = torch.randn((test_batch_size, n_patch_h*n_patch_w, (patch_size**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
+    noise_test = torch.randn((test_batch_size, diffusion_cfg.distillation_network_config.params.in_channels, H, W)).to(device=device)
+    HX, WX = H, W
+    for _ in range(2):
+        HX = HX//2
+        WX = WX//2
+        noise_test = torch.nn.functional.interpolate(noise_test, size=(HX, WX), mode='bilinear') * 2
+    noise_test = noise_test.reshape(test_batch_size, -1, n_patch_h//4, patch_size, n_patch_w//4, patch_size)
+    noise_test = rearrange(noise_test, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+    noise_test = noise_test.permute(0, 2, 1)
             
     with torch.no_grad():
 
@@ -492,13 +508,13 @@ def main():
         cfg_scale_cond_test = cfg_scale_test.expand(noise_test.shape[0]).to(device=device)
         t_test = torch.zeros_like(cfg_scale_cond_test)
 
-        for num_step_perflow in [1, 2, 6, 12, 24]:
+        for num_step_perflow in [1, 2, 5, 10, 20]:
             sampling_start = time.time()
             with accelerator.autocast():
                 if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
                     output_test = ema_model.module.forward_cfg(noise_test, t_test, 1.5, y=y_test, number_of_step_perflow=num_step_perflow)
                 else:
-                    output_test = ema_model.forward_cfg(noise_test, t_test, 1, y=y_test, number_of_step_perflow=num_step_perflow)
+                    output_test = ema_model.forward_cfg(noise_test, t_test, 2.5, y=y_test, number_of_step_perflow=num_step_perflow)
             
             sampling_time_1 = time.time() - sampling_start
             logger.info(f"Sampling time (NFE={num_step_perflow}): {sampling_time_1:.4f}s")
@@ -511,7 +527,7 @@ def main():
             samples = samples.to(torch.bfloat16)     
             samples = vae.decode(samples / vae.config.scaling_factor).sample
             samples = samples.clamp(-1, 1)
-            torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_test-{num_step_perflow}-cfg1-sfg.jpg"), normalize=True, scale_each=True)
+            torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_test-{num_step_perflow}-cfg4.jpg"), normalize=True, scale_each=True)
             torch.cuda.empty_cache()
     
     if 1:
@@ -521,15 +537,22 @@ def main():
             test_fid_batch_size = 50
 
             while args.eval_fid_num_samples > number:
-                latents = torch.randn((test_fid_batch_size, n_patch_h*n_patch_w, (patch_size**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
+                latents = torch.randn((test_fid_batch_size, diffusion_cfg.distillation_network_config.params.in_channels, H, W)).to(device=device)
+                HX, WX = H, W
+                for _ in range(2):
+                    HX = HX//2
+                    WX = WX//2
+                    latents = torch.nn.functional.interpolate(latents, size=(HX, WX), mode='bilinear') * 2
+                latents = latents.reshape(test_fid_batch_size, -1, n_patch_h//4, patch_size, n_patch_w//4, patch_size)
+                latents = rearrange(latents, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+                latents = latents.permute(0, 2, 1)
                 y = torch.randint(0, args.num_classes, (test_fid_batch_size,), device=device)
-                print('Y: ', y)
 
                 #model_kwargs_fid = dict(y=y, grid=grid_test.long(), mask=mask_test, size=size_test)
 
                 with accelerator.autocast():
                     if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                        output_test = ema_model.module.forward_cfg(latents, t_test, 2, y=y, number_of_step_perflow=6)
+                        output_test = ema_model.module.forward_cfg(latents, t_test, 3, y=y, number_of_step_perflow=6)
                     else:
                         output_test = ema_model.forward_cfg(latents, t_test, 1, y=y, number_of_step_perflow=2)
 
@@ -540,20 +563,13 @@ def main():
                     samples = ema_model.unpatchify(samples, (H, W))
                 samples = samples.to(torch.bfloat16)     
                 samples = vae.decode(samples / vae.config.scaling_factor).sample
-                #samples = samples.clamp(-1, 1)
+                samples = samples.clamp(-1, 1) # B C H W
                 samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
                 arr = samples.cpu().numpy()
                 arr_list.append(arr)
                 number += arr.shape[0]
             
             arr_list = np.concatenate(arr_list, axis=0)
-            print('Number of samples: ', number)
-            print('Number of arr_list: ', arr_list.shape[0])
-            # import pdb; pdb.set_trace()
-            # arr_list = arr_list[:args.eval_fid_num_samples]
-            # npz_path = '/hub_data2/dogyun/fitv2_sample_test.npz'
-            # np.savez(npz_path, arr_0=arr_list)
-
             sample_acts, sample_stats, sample_stats_spatial = calculate_inception_stats_imagenet(arr_list, evaluator)
             inception_score = evaluator.compute_inception_score(sample_acts[0])
             fid = sample_stats.frechet_distance(ref_stats)

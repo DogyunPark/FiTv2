@@ -21,6 +21,7 @@ import numpy as np
 import torch.distributed as dist
 import re
 import torchvision
+import matplotlib.pyplot as plt
 from omegaconf import OmegaConf
 from tqdm import tqdm
 from PIL import Image
@@ -32,6 +33,7 @@ from fit.utils.eval_utils import create_npz_from_sample_folder, init_from_ckpt
 from fit.utils.utils import instantiate_from_config
 from fit.utils.sit_eval_utils import parse_sde_args, parse_ode_args
 from fvcore.nn import FlopCountAnalysis, flop_count_table
+from fit.utils.measure import compute_spectral_entropy, compute_ssim, compute_pixelwise_variance, compute_gradient_magnitude, compute_mutual_information, high_frequency_ratio
 
 def ntk_scaled_init(head_dim, base=10000, alpha=8):
     #The method is just these two lines
@@ -245,7 +247,10 @@ def main(args):
     times = 0
     #for sampling_steps in [1, 2, 12, 24]:
     sampling_steps = args.num_sampling_steps
-    while len(all_images) * n < int(args.num_fid_samples):
+    spectral_entropies = []
+    hf_ratios = []
+    timesteps_list = []
+    if 1:
         scheduler.set_timesteps(sampling_steps, device=device)
         timesteps = scheduler.timesteps
         print("timesteps: ", timesteps, flush=True)
@@ -283,12 +288,7 @@ def main(args):
             model_kwargs = dict(y=y, grid=grid, mask=mask, size=size)
             model_fn = model.forward
 
-        remove_sigma_index = 1
         sigmas = torch.linspace(0, 1, sampling_steps+1).to(device)
-        # sigmas_list = sigmas.cpu().tolist()
-        # sigmas_list.pop(remove_sigma_index)
-        # sigmas_list.pop(remove_sigma_index)
-        # sigmas = torch.tensor(sigmas_list, device=device)
 
         # Sample images:
         # timesteps = reversed(timesteps)
@@ -313,8 +313,21 @@ def main(args):
             #noise_pred = torch.cat([noise_pred, rest], dim=2)
             z = z + (sigma_next - sigma_current) * noise_pred
 
-        #sampling_time_1 = time.time() - sampling_start
-        #print(f"Sampling time (NFE={sampling_steps}): {sampling_time_1:.4f}s")
+            if idx in [0, 20, 40, 60, 80, 99]:
+                samples = z[..., : n_patch_h*n_patch_w]
+                samples = model.unpatchify(samples, (H, W))        
+                samples = vae.decode(samples / vae.config.scaling_factor).sample
+                #samples = samples.clamp(-1, 1) # B C H W
+                torchvision.utils.save_image(samples, f'/hub_data2/dogyun/noisy_images/noisy_image_t{idx}.png', normalize=True, scale_each=True)
+
+                entropy = compute_spectral_entropy(samples.cpu())  # (B,)
+                mean_entropy = entropy.mean().item()
+                spectral_entropies.append(mean_entropy)
+
+                hf_ratio = high_frequency_ratio(samples.cpu())
+                hf_ratios.append(hf_ratio)
+
+                timesteps_list.append(sigma_current.cpu().item())
 
         samples = z[..., : n_patch_h*n_patch_w]
         samples = model.unpatchify(samples, (H, W))        
@@ -328,25 +341,51 @@ def main(args):
         # gathered_samples = [torch.zeros_like(samples) for _ in range(dist.get_world_size())]
         # dist.all_gather(gathered_samples, samples)  # gather not supported with NCCL
         all_images.extend([sample.cpu().numpy() for sample in [samples]])
-        # # Save samples to disk as individual .png files
-        # for i, sample in enumerate(samples.cpu().numpy()):
-        #     index = i * dist.get_world_size() + rank + total
-        #     Image.fromarray(sample).save(f"{sample_folder_dir}/{index:06d}.png")
-        # total += global_batch_size
-        # if rank == 0:
-        #     pbar.update()
+        
+        entropy_change_rate = []
+        for i in range(1, len(spectral_entropies)):
+            dt = -(timesteps_list[i] - timesteps_list[i-1])
+            de = spectral_entropies[i] - spectral_entropies[i-1]
+            entropy_change_rate.append(de / dt)
+        # Add a value for the first point (can use forward difference)
+        if len(spectral_entropies) > 1:
+            entropy_change_rate.insert(0, entropy_change_rate[0])
+        else:
+            entropy_change_rate.append(0)  # Handle edge case with only one point
+        entropy_change_rate = np.array(entropy_change_rate)
 
-    # Make sure all processes have finished saving their samples before attempting to convert to .npz
-    dist.barrier()
-    if rank == 0:
-        import time
-        time.sleep(20)
-        arr = np.concatenate(all_images, axis=0)
-        arr = arr[: int(args.num_fid_samples)]
-        npz_path = f"/hub_data4/dogyun/FIT-samples-{sampling_steps}-500-cfg2.npz"
-        np.savez(npz_path, arr_0=arr)
-        print(f"Saved .npz file to {npz_path} [shape={arr.shape}].")
-        print("Done.")
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+
+        # Plot spectral entropy and its change rate
+        ax1.plot(timesteps_list, spectral_entropies, 'b-o', linewidth=2, label='Spectral Entropy')
+        ax1.set_xlabel('Timestep (t)', fontsize=12)
+        ax1.set_ylabel('Spectral Entropy', color='b', fontsize=12)
+        ax1.tick_params(axis='y', labelcolor='b')
+        ax1.grid(True, alpha=0.3)
+        ax1.set_title('Spectral Entropy vs Timestep', fontsize=14)
+
+        # Add entropy change rate on secondary axis
+        ax1_twin = ax1.twinx()
+        ax1_twin.plot(timesteps_list, entropy_change_rate, 'r--s', linewidth=2, label='Change Rate')
+        ax1_twin.set_ylabel('Change Rate of Entropy', color='r', fontsize=12)
+        ax1_twin.tick_params(axis='y', labelcolor='r')
+
+        # Add legend for both plots on the first subplot
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax1_twin.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=10)
+
+        # Plot high frequency ratio
+        ax2.plot(timesteps_list, hf_ratios, 'm-o', linewidth=2)
+        ax2.set_xlabel('Timestep (t)', fontsize=12)
+        ax2.set_ylabel('High Frequency Ratio', fontsize=12)
+        ax2.grid(True, alpha=0.3)
+        ax2.set_title('High Frequency Ratio vs Timestep', fontsize=14)
+
+        plt.tight_layout()
+        plt.savefig('/hub_data2/dogyun/spectral_entropy_vs_timesteps.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
     dist.barrier()
     dist.destroy_process_group()
 

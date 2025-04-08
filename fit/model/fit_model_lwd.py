@@ -7,11 +7,11 @@ from fit.model.modules_lwd import (
     PatchEmbedder, TimestepEmbedder, LabelEmbedder,
     FiTBlock, FinalLayer, RepresentationBlock
 )
-from fit.model.utils import get_parameter_dtype
+from fit.model.utils import get_parameter_dtype, make_grid_mask_size, make_grid_mask_size_online
 from fit.utils.eval_utils import init_from_ckpt
 #from fit.model.sincos import get_2d_sincos_pos_embed_from_grid
 from fit.model.rope import VisionRotaryEmbedding, get_2d_sincos_pos_embed
-#from fit.utils.utils import linear_increase_division
+from fit.utils.utils import linear_increase_division, linear_decrease_division
 #################################################################################
 #                                 Core FiT Model                                #
 #################################################################################
@@ -68,6 +68,8 @@ class FiTLwD(nn.Module):
         number_of_shared_blocks: int = 1,
         number_of_representation_blocks: int = 1,
         global_cls: bool = False,
+        n_patch_h: int = 16,
+        n_patch_w: int = 16,
         **kwargs,
     ):
         super().__init__()
@@ -88,8 +90,9 @@ class FiTLwD(nn.Module):
         self.adaln_type = adaln_type
         self.online_rope = online_rope
         self.time_shifting = time_shifting
-        self.sigmas = torch.linspace(0, 1, number_of_perflow+1)
-        self.sigmas_overlap = self.sigmas - 1/(number_of_perflow*2)
+        #self.sigmas = torch.linspace(0, 1, number_of_perflow+1)
+        self.sigmas = linear_decrease_division(number_of_perflow)
+        self.sigmas_overlap = self.sigmas - 1/(number_of_perflow*5)
         self.overlap = overlap
         self.perlayer_embedder = perlayer_embedder
         self.number_of_perflow = number_of_perflow
@@ -97,6 +100,8 @@ class FiTLwD(nn.Module):
         self.number_of_shared_blocks = number_of_shared_blocks
         self.number_of_representation_blocks = number_of_representation_blocks
         self.global_cls = global_cls
+        self.n_patch_h = n_patch_h
+        self.n_patch_w = n_patch_w
 
         if number_of_representation_blocks > 1:
             self.representation_x_embedder = PatchEmbedder(in_channels * patch_size**2, hidden_size, bias=True)
@@ -301,7 +306,7 @@ class FiTLwD(nn.Module):
             x = rearrange(x, "b (c p1 p2) h w -> b c (h p1) (w p2)", p1=p, p2=p) # (B, 16, h//2, w//2) -> (B, h, w, 4)
         return x
 
-    def forward(self, x, t, cfg, y, grid, mask, size=None, number_of_step_perflow=1, noise=None, representation_noise=None):
+    def forward(self, x, t, cfg, y, number_of_step_perflow=1, noise=None, representation_noise=None):
         """
         Forward pass of FiT.
         x: (B, p**2 * C_in, N), tensor of sequential inputs (flattened latent features of images, N=H*W/(p**2))
@@ -313,8 +318,9 @@ class FiTLwD(nn.Module):
         --------------------------------------------------------------------------------------------
         return: (B, p**2 * C_out, N), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
         """
-        cfg = cfg.float().to(x.dtype) 
+        #cfg = cfg.float().to(x.dtype) 
         
+        grid, mask, size = make_grid_mask_size(x.shape[0], self.n_patch_h, self.n_patch_w, self.patch_size, x.device)
         # get RoPE frequences in advance, then calculate attention.
         if self.online_rope:    
             freqs_cos, freqs_sin = self.rel_pos_embed.online_get_2d_rope_from_grid(grid, size)
@@ -353,6 +359,11 @@ class FiTLwD(nn.Module):
                 t = self.t_embedder(t)
                 c = t + y_embed
 
+                if self.global_adaLN_modulation != None:
+                    global_adaln = self.global_adaLN_modulation(c)
+                else: 
+                    global_adaln = 0.0
+
                 if self.fourier_basis is not None:
                     t_next = self.sigmas[i+1].expand(x.shape[0]).to(x.device)
                     t_next = torch.clamp(self.time_shifting * t_next / (1  + (self.time_shifting - 1) * t_next), max=1.0)        
@@ -369,20 +380,15 @@ class FiTLwD(nn.Module):
                     #representation_noise = representation_noise + self.pos_embed
                     for rep_block in self.representation_blocks:
                         if not self.use_checkpoint:
-                            representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin)
+                            representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
                         else:
-                            representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin)
+                            representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
                     
                     #representation_noise_mean = torch.mean(representation_noise, dim=1)
                     #representation_patch = representation_noise[:, 1:, :]
                     #representation_noise_mean = representation_noise[:, 0, :]
                     #c = torch.cat([c, representation_noise_mean], dim=1)
                     #c = c + representation_noise_mean
-
-                if self.global_adaLN_modulation != None:
-                    global_adaln = self.global_adaLN_modulation(c)
-                else: 
-                    global_adaln = 0.0
 
                 residual = x.clone()
                 if not self.use_sit:
@@ -394,6 +400,7 @@ class FiTLwD(nn.Module):
 
                 if self.number_of_representation_blocks > 1:
                     x += representation_noise
+                    #x = representation_noise
                 
                 if self.use_checkpoint:
                     if self.number_of_shared_blocks > 0:
@@ -431,18 +438,24 @@ class FiTLwD(nn.Module):
                 x = (self.sigmas_overlap[i+1] / self.sigmas[i+1]) * x + (((1-self.sigmas_overlap[i+1])**2 - ((1-self.sigmas[i+1])**2 * (self.sigmas_overlap[i+1])**2 / (self.sigmas[i+1])**2))).sqrt() * add_noise
         return x
     
-    def forward_run_layer(self, x, t, cfg, y, grid, mask, size=None, target_layer_start=None, target_layer_end=None, t_next=None, representation_noise=None):
+    def forward_run_layer(self, x, t, cfg, y, target_layer_start=None, target_layer_end=None, t_next=None, representation_noise=None):
         assert target_layer_start is not None, "target_layer_start must be provided"
         assert target_layer_end is not None, "target_layer_end must be provided"
         assert len(self.blocks) >= target_layer_end, "target_layer_end must be within the range of the number of blocks"
 
+        grid, mask, size = make_grid_mask_size_online(x, self.patch_size, x.device)
         # get RoPE frequences in advance, then calculate attention.
-        if self.online_rope:    
-            freqs_cos, freqs_sin = self.rel_pos_embed.online_get_2d_rope_from_grid(grid, size)
-            freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
-        else:
-            freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
-            freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
+         
+        freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
+        freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
+
+        # # get RoPE frequences in advance, then calculate attention.
+        # if self.online_rope:    
+        #     freqs_cos, freqs_sin = self.rel_pos_embed.online_get_2d_rope_from_grid(grid, size)
+        #     freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
+        # else:
+        #     freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
+        #     freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
 
         t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
         t = t.float().to(x.dtype)
@@ -457,6 +470,11 @@ class FiTLwD(nn.Module):
         # else:
         y = self.y_embedder(y, self.training)           # (B, D)
         c = t + y
+
+        if self.global_adaLN_modulation != None:
+            global_adaln = self.global_adaLN_modulation(c)
+        else: 
+            global_adaln = 0.0
 
         if self.fourier_basis is not None:
             assert t_next is not None, "t_next must be provided when fourier_basis is True"
@@ -473,9 +491,9 @@ class FiTLwD(nn.Module):
             #representation_noise = representation_noise + self.pos_embed
             for rep_block in self.representation_blocks:
                 if not self.use_checkpoint:
-                    representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin)
+                    representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
                 else:
-                    representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin)
+                    representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
             
             #if 1:
             representation_linear = self.linear_projection(representation_noise)
@@ -490,11 +508,6 @@ class FiTLwD(nn.Module):
             representation_noise = torch.where(drop_ids[:, None, None], 0, representation_noise)
             #c = torch.cat([c, representation_noise_mean], dim=1)
             #c = c + representation_noise_mean
-        
-        if self.global_adaLN_modulation != None:
-            global_adaln = self.global_adaLN_modulation(c)
-        else: 
-            global_adaln = 0.0
 
         if not self.use_sit:
             x = rearrange(x, 'B C N -> B N C')          # (B, C, N) -> (B, N, C), where C = p**2 * C_in
@@ -505,6 +518,7 @@ class FiTLwD(nn.Module):
         
         if self.number_of_representation_blocks > 1:
             x += representation_noise
+            #x = representation_noise
 
         if not self.use_checkpoint:
             if self.number_of_shared_blocks > 0:
@@ -533,9 +547,9 @@ class FiTLwD(nn.Module):
             x = rearrange(x, 'B N C -> B C N')
         
         if self.number_of_representation_blocks > 1:
-            return x, representation_linear, None, None
+            return x, representation_linear, None
         else:
-            return x, None, None, None
+            return x, None, None
     
     def forward_run_layer_from_target_layer(self, x, t_input, cfg, y, grid, mask, size=None, 
             target_start_idx=None, target_end_idx=None, number_of_step_perflow=1, return_all_layers=False, noise=None):
@@ -613,7 +627,7 @@ class FiTLwD(nn.Module):
         else:   
             return x
     
-    def forward_cfg(self, x, t, cfg, y, grid, mask, size=None, number_of_step_perflow=1, noise=None, representation_noise=None):
+    def forward_cfg(self, x, t, cfg, y, number_of_step_perflow=1, noise=None, representation_noise=None):
         """
         Forward pass of FiT.
         x: (B, p**2 * C_in, N), tensor of sequential inputs (flattened latent features of images, N=H*W/(p**2))
@@ -626,13 +640,14 @@ class FiTLwD(nn.Module):
         return: (B, p**2 * C_out, N), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
         """
 
-        assert cfg > 1, "cfg must be greater than 1"
+        #assert cfg > 1, "cfg must be greater than 1"
         y_null = torch.tensor([self.num_classes] * x.shape[0], device=x.device)
         y = torch.cat([y, y], dim=0)
         # if self.perlayer_embedder:
         #     y_embed = self.y_embedder[0](y, self.training)           # (B, D)
         # else:
         y_embed = self.y_embedder(y, self.training)           # (B, D)
+        grid, mask, size = make_grid_mask_size(x.shape[0], self.n_patch_h, self.n_patch_w, self.patch_size, x.device)
         size = torch.cat([size, size], dim=0)
         grid = torch.cat([grid, grid], dim=0)
         mask = torch.cat([mask, mask], dim=0)
@@ -666,6 +681,11 @@ class FiTLwD(nn.Module):
                 t = self.t_embedder(t)
                 c = t + y_embed
 
+                if self.global_adaLN_modulation != None:
+                    global_adaln = self.global_adaLN_modulation(c)
+                else: 
+                    global_adaln = 0.0
+
                 if self.fourier_basis is not None:
                     t_next = self.sigmas[i+1].expand(x.shape[0]).to(x.device)
                     t_next = torch.clamp(self.time_shifting * t_next / (1  + (self.time_shifting - 1) * t_next), max=1.0)        
@@ -685,22 +705,17 @@ class FiTLwD(nn.Module):
                     #representation_noise = representation_noise + self.pos_embed
                     for rep_block in self.representation_blocks:
                         if not self.use_checkpoint:
-                            representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin)
+                            representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
                         else:
-                            representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin)
+                            representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
                     
                     #representation_noise_mean = torch.mean(representation_noise, dim=1)
                     #representation_noise_mean = representation_noise[:, 0, :]
-                    #if i <= (len(self.blocks) // self.number_of_layers_for_perflow) // 2:
-                    representation_noise, _ = representation_noise.chunk(2, dim=0)
+                    representation_noise, representation_noise_null = representation_noise.chunk(2, dim=0)
+                    #representation_noise = representation_noise_null + cfg * (representation_noise - representation_noise_null)
                     representation_noise = torch.cat([representation_noise, torch.zeros_like(representation_noise)], dim=0)
                     #c = torch.cat([c, representation_noise], dim=1)
                     #c = c + representation_noise_mean
-
-                if self.global_adaLN_modulation != None:
-                    global_adaln = self.global_adaLN_modulation(c)
-                else: 
-                    global_adaln = 0.0
 
                 if not self.use_sit:
                     x = rearrange(x, 'B C N -> B N C')          # (B, C, N) -> (B, N, C), where C = p**2 * C_in
@@ -711,7 +726,7 @@ class FiTLwD(nn.Module):
                 
                 if self.number_of_representation_blocks > 1:
                     x += representation_noise
-
+                    #x = representation_noise
                 if self.use_checkpoint:
                     if self.number_of_shared_blocks > 0:
                         for block in self.start_shared_blocks:

@@ -42,20 +42,24 @@ from fit.utils.utils import (
     update_ema,
     
 )
-from fit.utils.eval_utils import init_from_ckpt, calculate_inception_stats_imagenet
+from fit.utils.eval_utils import init_from_ckpt, calculate_inception_stats_cifar, compute_fid
 from fit.utils.lr_scheduler import get_scheduler
 from fit.model.fit_model import FiTBlock
 from fit.model.modules import FinalLayer, PatchEmbedder, TimestepEmbedder, LabelEmbedder
 from fit.scheduler.transport.utils import get_flexible_mask_and_ratio, mean_flat
+from fit.data.cifar_dataset import create_cifar10_dataloader
 
-#from came_pytorch import CAME
 from PIL import Image
-#from elatentlpips import ELatentLPIPS
-from fit.scheduler.transport.utils import loss_func_huber
-from fit.utils.utils import bell_shaped_sample
-import tensorflow.compat.v1 as tf
-from fit.utils.evaluator import Evaluator
+import dnnlib
+import pickle
+
 from fvcore.nn import FlopCountAnalysis, flop_count_table
+
+def cycle(dl):
+    while True:
+        for data in dl:
+            yield data
+
 logger = get_logger(__name__, log_level="INFO")
 
 # For Omegaconf Tuple
@@ -370,8 +374,8 @@ def main():
         diffusers.utils.logging.set_verbosity_error()
         diffusers.utils.logging.set_verbosity_error()
     
-    # if args.seed is not None:
-    #     set_seed(args.seed)
+    if args.seed is not None:
+        set_seed(args.seed)
 
     if args.allow_tf32: # for A100
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -387,9 +391,11 @@ def main():
     else:
         learning_rate = accelerate_cfg.learning_rate
 
-    
     ema_model = instantiate_from_config(diffusion_cfg.distillation_network_config).to(device=device)
     init_from_ckpt(ema_model, checkpoint_dir=args.pretrain_ckpt, ignore_keys=None, verbose=True)
+    
+    trainable_params = sum(p.numel() for p in ema_model.parameters() if p.requires_grad)
+    logger.info(f"Trainable parameters: {trainable_params}")
 
     number_of_perflow = args.number_of_perflow
     number_of_layers_for_perflow = args.number_of_layers_for_perflow
@@ -401,34 +407,30 @@ def main():
     logger.info(f"Number of layers for perflow: {number_of_layers_for_perflow}")
     logger.info(f"Total sampling steps: {number_of_perflow * solver_step}")
     
-    #scheduler = FlowMatchEulerDiscreteScheduler(invert_sigmas=True)
-    #scheduler.set_timesteps(num_inference_steps, device=device)
-    #timesteps = scheduler.timesteps
-    #sigmas = scheduler.sigmas
     sigmas = torch.linspace(0, 1, number_of_perflow+1).to(device)
     logger.info(f"Sigmas: {sigmas}")
 
+    train_dataloader = create_cifar10_dataloader(
+        batch_size=data_cfg.params.train.loader.batch_size, num_workers=data_cfg.params.train.loader.num_workers, train=True
+    )
+    train_dataloader = accelerator.prepare(train_dataloader)
+    train_dataloader = cycle(train_dataloader)
     ema_model = accelerator.prepare_model(ema_model, device_placement=False)
-
-   
-    vae_model = 'stabilityai/sd-vae-ft-ema'
-    vae = AutoencoderKL.from_pretrained(vae_model, local_files_only=True).to(device, dtype=torch.bfloat16)
-    vae.eval() # important
 
     
     if accelerator.is_main_process and args.eval_fid:
-        hf_config = tf.ConfigProto(
-            allow_soft_placement=True  # allows DecodeJpeg to run on CPU in Inception graph
-        )
-        hf_config.gpu_options.allow_growth = True
-        hf_config.gpu_options.per_process_gpu_memory_fraction = 0.1
-        evaluator = Evaluator(tf.Session(config=hf_config), batch_size=20)
-        ref_acts = evaluator.read_activations_npz(args.ref_path)
-        ref_stats, ref_stats_spatial = evaluator.read_statistics(args.ref_path, ref_acts)
+        assert args.ref_path is not None, "Reference path is not provided."
+        print('Loading Inception-v3 model...')
+        detector_url = 'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl'
+        detector_kwargs = dict(return_features=True)
+        feature_dim = 2048
+        with dnnlib.util.open_url(detector_url, verbose=(0 == 0)) as f:
+            detector_net = pickle.load(f).to(device)
+        with dnnlib.util.open_url(args.ref_path) as f:
+            ref = dict(np.load(f))
+        mu_ref = ref['mu']
+        sigma_ref = ref['sigma']
     
-    torch.cuda.empty_cache()
-    tf.reset_default_graph()
-
     ema_model.eval()
 
     logger.info("Measuring model GFLOPs...")
@@ -438,7 +440,15 @@ def main():
     
     # Create sample inputs for GFLOPs calculation
     sample_batch_size = 1
-    sample_noise = torch.randn((sample_batch_size, n_patch_h*n_patch_w, (patch_size**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
+    sample_noise = torch.randn((sample_batch_size, diffusion_cfg.distillation_network_config.params.in_channels, H, W)).to(device=device)
+    HX, WX = H, W
+    for _ in range(2):
+        HX = HX//2
+        WX = WX//2
+        sample_noise = torch.nn.functional.interpolate(sample_noise, size=(HX, WX), mode='bilinear') * 2
+    sample_noise = sample_noise.reshape(sample_batch_size, -1, n_patch_h//4, patch_size, n_patch_w//4, patch_size)
+    sample_noise = rearrange(sample_noise, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+    sample_noise = sample_noise.permute(0, 2, 1)
     sample_t = torch.zeros(sample_batch_size).to(device=device)
     sample_y = torch.zeros(sample_batch_size, dtype=torch.int).to(device=device)
     
@@ -478,27 +488,37 @@ def main():
         logger.info(f"Sampling GFLOPs (NFE={nfe}): {total_sampling_flops/1e9:.4f}")       
         torch.cuda.empty_cache()
 
-    test_batch_size = 50
+    test_batch_size = 20
     n_patch_h, n_patch_w = 16, 16
     patch_size = 2
     H, W = n_patch_h * patch_size, n_patch_w * patch_size
     print('Generating images with resolution: ', H, 'x', W)
     y_test = torch.randint(0, args.num_classes, (test_batch_size,), device=device)
-    noise_test = torch.randn((test_batch_size, n_patch_h*n_patch_w, (patch_size**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
-            
+    noise_test = torch.randn((test_batch_size, diffusion_cfg.distillation_network_config.params.in_channels, H, W)).to(device=device)
+    HX, WX = H, W
+    for _ in range(2):
+        HX = HX//2
+        WX = WX//2
+        noise_test = torch.nn.functional.interpolate(noise_test, size=(HX, WX), mode='bilinear') * 2
+    noise_test = noise_test.reshape(test_batch_size, -1, n_patch_h//4, patch_size, n_patch_w//4, patch_size)
+    noise_test = rearrange(noise_test, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+    noise_test = noise_test.permute(0, 2, 1)
+    
+    sigmas = torch.linspace(0, 1, number_of_perflow+1).to(device)
+
     with torch.no_grad():
 
         cfg_scale_test = 4 * torch.ones(1)
         cfg_scale_cond_test = cfg_scale_test.expand(noise_test.shape[0]).to(device=device)
         t_test = torch.zeros_like(cfg_scale_cond_test)
 
-        for num_step_perflow in [1, 2, 6, 12, 24]:
+        for num_step_perflow in [1, 2, 6]:
             sampling_start = time.time()
             with accelerator.autocast():
                 if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
                     output_test = ema_model.module.forward_cfg(noise_test, t_test, 1.5, y=y_test, number_of_step_perflow=num_step_perflow)
                 else:
-                    output_test = ema_model.forward_cfg(noise_test, t_test, 1, y=y_test, number_of_step_perflow=num_step_perflow)
+                    output_test = ema_model.forward_cfg(noise_test, t_test, 1.5, y=y_test, number_of_step_perflow=num_step_perflow)
             
             sampling_time_1 = time.time() - sampling_start
             logger.info(f"Sampling time (NFE={num_step_perflow}): {sampling_time_1:.4f}s")
@@ -508,12 +528,10 @@ def main():
                 samples = ema_model.module.unpatchify(samples, (H, W))
             else:
                 samples = ema_model.unpatchify(samples, (H, W))
-            samples = samples.to(torch.bfloat16)     
-            samples = vae.decode(samples / vae.config.scaling_factor).sample
             samples = samples.clamp(-1, 1)
-            torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_test-{num_step_perflow}-cfg1-sfg.jpg"), normalize=True, scale_each=True)
+            torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_test-{num_step_perflow}.jpg"), normalize=True, scale_each=True)
             torch.cuda.empty_cache()
-    
+
     if 1:
         with torch.no_grad():
             number = 0
@@ -521,9 +539,16 @@ def main():
             test_fid_batch_size = 50
 
             while args.eval_fid_num_samples > number:
-                latents = torch.randn((test_fid_batch_size, n_patch_h*n_patch_w, (patch_size**2)*diffusion_cfg.distillation_network_config.params.in_channels)).to(device=device)
+                latents = torch.randn((test_fid_batch_size, diffusion_cfg.distillation_network_config.params.in_channels, H, W)).to(device=device)
+                HX, WX = H, W
+                for _ in range(2):
+                    HX = HX//2
+                    WX = WX//2
+                    latents = torch.nn.functional.interpolate(latents, size=(HX, WX), mode='bilinear') * 2
+                latents = latents.reshape(test_fid_batch_size, -1, n_patch_h//4, patch_size, n_patch_w//4, patch_size)
+                latents = rearrange(latents, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+                latents = latents.permute(0, 2, 1)
                 y = torch.randint(0, args.num_classes, (test_fid_batch_size,), device=device)
-                print('Y: ', y)
 
                 #model_kwargs_fid = dict(y=y, grid=grid_test.long(), mask=mask_test, size=size_test)
 
@@ -531,39 +556,23 @@ def main():
                     if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
                         output_test = ema_model.module.forward_cfg(latents, t_test, 2, y=y, number_of_step_perflow=6)
                     else:
-                        output_test = ema_model.forward_cfg(latents, t_test, 1, y=y, number_of_step_perflow=2)
+                        output_test = ema_model.forward_cfg(latents, t_test, 1.5, y=y, number_of_step_perflow=2)
 
                 samples = output_test[:, : n_patch_h*n_patch_w]
                 if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
                     samples = ema_model.module.unpatchify(samples, (H, W))
                 else:
                     samples = ema_model.unpatchify(samples, (H, W))
-                samples = samples.to(torch.bfloat16)     
-                samples = vae.decode(samples / vae.config.scaling_factor).sample
-                #samples = samples.clamp(-1, 1)
+                samples = samples.clamp(-1, 1)
                 samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
                 arr = samples.cpu().numpy()
                 arr_list.append(arr)
                 number += arr.shape[0]
             
             arr_list = np.concatenate(arr_list, axis=0)
-            print('Number of samples: ', number)
-            print('Number of arr_list: ', arr_list.shape[0])
-            # import pdb; pdb.set_trace()
-            # arr_list = arr_list[:args.eval_fid_num_samples]
-            # npz_path = '/hub_data2/dogyun/fitv2_sample_test.npz'
-            # np.savez(npz_path, arr_0=arr_list)
-
-            sample_acts, sample_stats, sample_stats_spatial = calculate_inception_stats_imagenet(arr_list, evaluator)
-            inception_score = evaluator.compute_inception_score(sample_acts[0])
-            fid = sample_stats.frechet_distance(ref_stats)
-            sfid = sample_stats_spatial.frechet_distance(ref_stats_spatial)
-            prec, recall = evaluator.compute_prec_recall(ref_acts[0], sample_acts[0])
-            logger.info(f"Inception Score: {inception_score}")
-            logger.info(f"FID: {fid}")
-            logger.info(f"Spatial FID: {sfid}")
-            logger.info(f"Precision: {prec}")
-            logger.info(f"Recall: {recall}")
+            mu, sigma = calculate_inception_stats_cifar(arr_list, detector_net=detector_net, detector_kwargs=detector_kwargs, device=device)
+            fid = compute_fid(mu, sigma, ref_mu=mu_ref, ref_sigma=sigma_ref)
+            print(f"FID: {fid}")
     accelerator.end_training()
 
 if __name__ == "__main__":

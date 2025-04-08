@@ -65,7 +65,7 @@ diffusion:
       use_sit: true
       use_swiglu: true
       use_swiglu_large: false
-      use_checkpoint: true
+      use_checkpoint: false
       q_norm: layernorm
       k_norm: layernorm
       qk_norm_weight: false
@@ -89,14 +89,14 @@ data:
       target_len: 256
       random: 'crop'
       loader:
-        batch_size: 32
+        batch_size: 40
         num_workers: 8
         shuffle: true
 
 
 accelerate:
   # others
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   mixed_precision: 'bf16'
   # training step config
   num_train_epochs: 
@@ -121,7 +121,7 @@ accelerate:
   logger: wandb
   checkpointing_epochs: False
   checkpointing_steps: 5000
-  checkpointing_steps_list: [500, 200000, 400000, 1000000, 1400000, 1500000, 1800000]
+  checkpointing_steps_list: [50000, 100000, 200000, 400000, 1000000, 1400000, 1500000, 1800000]
   checkpoints_total_limit: 2
   logging_steps: 1000
   evaluation_steps: 200
