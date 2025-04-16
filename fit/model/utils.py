@@ -6,6 +6,9 @@ from typing import List, Tuple
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
+def modulate_representation(x, shift, scale):
+    return x * (1 + scale) + shift
+
 
 def get_parameter_dtype(parameter: torch.nn.Module):
     try:

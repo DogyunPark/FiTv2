@@ -1,0 +1,9 @@
+                # Backpropagate
+                loss = loss #/ number_of_perflow
+                proj_loss = proj_loss #/ number_of_perflow
+                loss += 0.5 * proj_loss
+                accelerator.backward(loss)
+            if accelerator.sync_gradients and accelerate_cfg.max_grad_norm > 0.:
+                all_norm = accelerator.clip_grad_norm_(
+                    model.parameters(), accelerate_cfg.max_grad_norm
+                ) 

@@ -7,7 +7,7 @@ from torch.jit import Final
 from timm.layers.mlp import SwiGLU, Mlp  
 from typing import Any, Callable, Dict, List, Optional, Union, Tuple
 from fit.model.rope import rotate_half
-from fit.model.utils import modulate
+from fit.model.utils import modulate, modulate_representation
 from fit.model.norms import create_norm
 from functools import partial
 from einops import rearrange, repeat
@@ -55,27 +55,102 @@ class TimestepEmbedder(nn.Module):
         """
         Create sinusoidal timestep embeddings.
         :param t: a 1-D Tensor of N indices, one per batch element.
-                          These may be fractional.
+                        These may be fractional.
         :param dim: the dimension of the output.
         :param max_period: controls the minimum frequency of the embeddings.
         :return: an (N, D) Tensor of positional embeddings.
         """
-        # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
+        # Handle scalar or empty inputs by making them 1D
+        if t.dim() == 0:
+            t = t.unsqueeze(0)
+            
         half = dim // 2
         freqs = torch.exp(
             -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
         ).to(device=t.device)
+        
+        # Ensure proper broadcasting
         args = t[:, None] * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
             embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1]).to(device=t.device)], dim=-1)
+        
+        # Always ensure output is at least 2D
+        if embedding.dim() == 1:
+            embedding = embedding.unsqueeze(0)
+            
         return embedding.to(dtype=t.dtype)
 
     def forward(self, t):
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+        #if t_freq.dim() == 2:
+        #t_freq = t_freq.unsqueeze(1)
         t_emb = self.mlp(t_freq)
+        #t_emb = t_emb.squeeze(1)
         return t_emb
 
+# class TimestepEmbedder(nn.Module):
+#     """
+#     Embeds scalar timesteps into vector representations.
+#     """
+#     def __init__(self, hidden_size, frequency_embedding_size=256):
+#         super().__init__()
+#         self.mlp = nn.Sequential(
+#             nn.Linear(frequency_embedding_size, hidden_size, bias=True),
+#             nn.SiLU(),
+#             nn.Linear(hidden_size, hidden_size, bias=True),
+#         )
+#         self.frequency_embedding_size = frequency_embedding_size
+
+#     @staticmethod
+#     def timestep_embedding(t, dim, max_period=10000):
+#         """
+#         Create sinusoidal timestep embeddings.
+#         :param t: a 1-D Tensor of N indices, one per batch element.
+#                           These may be fractional.
+#         :param dim: the dimension of the output.
+#         :param max_period: controls the minimum frequency of the embeddings.
+#         :return: an (N, D) Tensor of positional embeddings.
+#         """
+#         # Handle scalar inputs by making them at least 1D
+#         if t.dim() == 0:
+#             t = t.view(1)
+            
+#         half = dim // 2
+#         freqs = torch.exp(
+#             -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
+#         ).to(device=t.device)
+        
+#         # Ensure proper broadcasting with explicit dims
+#         args = t.view(-1, 1) * freqs.view(1, -1)
+#         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        
+#         if dim % 2:
+#             embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+            
+#         return embedding.to(dtype=t.dtype)
+
+#     def forward(self, t):
+#         # Save original dims for restoration
+#         original_dim = t.dim()
+        
+#         # Ensure t is at least 1D
+#         if t.dim() == 0:
+#             t = t.view(1)
+            
+#         t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+        
+#         # Make sure t_freq is properly shaped for MLP
+#         if t_freq.dim() == 1:
+#             t_freq = t_freq.unsqueeze(0)
+            
+#         t_emb = self.mlp(t_freq)
+        
+#         # Restore original dimensions if input was scalar
+#         if original_dim == 0 and t_emb.size(0) == 1:
+#             t_emb = t_emb.squeeze(0)
+            
+#         return t_emb
 
 class LabelEmbedder(nn.Module):
     """
@@ -178,7 +253,19 @@ class Attention(nn.Module):
         attn_mask = (attn_mask == attn_mask.transpose(-2, -1))  # (B, 1, 1, N) x (B, 1, N, 1) -> (B, 1, N, N)
         mask = torch.not_equal(mask, torch.zeros_like(mask)).to(mask)   # (B, N) -> (B, N)
         
-        
+        # try:
+        #     import xformers.ops as xops
+        #     dtype = q.dtype
+        #     # xformers implementation
+        #     q, k, v = map(lambda t: t.to(dtype).contiguous(), (q, k, v))
+        #     x = xops.memory_efficient_attention(
+        #         q, k, v, 
+        #         attn_bias=None if attn_mask is None else xops.LowerTriangularMask(),
+        #         op=None,  # let xformers choose the best op
+        #         scale=self.scale,
+        #         p=self.attn_drop.p if self.training else 0.0
+        #     )
+        # except (ImportError, ModuleNotFoundError):
         if x.device.type == "cpu":
             x = F.scaled_dot_product_attention(
                 q, k, v, attn_mask=attn_mask,
@@ -278,12 +365,11 @@ class FiTBlock(nn.Module):
             )
 
     def forward(self, x, c, mask, freqs_cos, freqs_sin, global_adaln=0.0):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.adaLN_modulation(c) + global_adaln).chunk(6, dim=1)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.adaLN_modulation(c).unsqueeze(1) + global_adaln).chunk(6, dim=-1)
         if self.projection is not None:
             x = self.projection(x)
-        #import pdb; pdb.set_trace()
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), mask, freqs_cos, freqs_sin)
-        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        x = x + gate_msa * self.attn(modulate_representation(self.norm1(x), shift_msa, scale_msa), mask, freqs_cos, freqs_sin)
+        x = x + gate_mlp * self.mlp(modulate_representation(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
 class RepresentationBlock(nn.Module):
@@ -368,7 +454,7 @@ class FinalLayer(nn.Module):
             )
         
     def forward(self, x, c):
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
         x = modulate(self.norm_final(x), shift, scale)
         x = self.linear(x)
         return x

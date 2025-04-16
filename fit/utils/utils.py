@@ -100,6 +100,12 @@ def linear_increase_division(N):
     sigmas = torch.cat((torch.tensor([0.0]), torch.cumsum(segment_length, dim=0)))
     return sigmas
 
+def linear_decrease_division(N):
+    weights = torch.arange(N, 0, -1)
+    total_weight = weights.sum()
+    segment_length = weights / total_weight
+    sigmas = torch.cat((torch.tensor([0.0]), torch.cumsum(segment_length, dim=0)))
+    return sigmas
 
 @torch.no_grad()
 def load_encoders(enc_type, device, resolution=256):

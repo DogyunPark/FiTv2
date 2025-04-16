@@ -389,8 +389,12 @@ def main():
 
     
     ema_model = instantiate_from_config(diffusion_cfg.distillation_network_config).to(device=device)
-    init_from_ckpt(ema_model, checkpoint_dir=args.pretrain_ckpt, ignore_keys=None, verbose=True)
-
+    #init_from_ckpt(ema_model, checkpoint_dir=args.pretrain_ckpt, ignore_keys=None, verbose=True)
+    # Calculate and log total number of parameters
+    total_params = sum(p.numel() for p in ema_model.parameters())
+    #trainable_params = sum(p.numel() for p in ema_model.parameters() if p.requires_grad)
+    logger.info(f"Total parameters: {total_params:,}")
+    #logger.info(f"Trainable parameters: {trainable_params:,}")
     number_of_perflow = args.number_of_perflow
     number_of_layers_for_perflow = args.number_of_layers_for_perflow
     assert number_of_perflow * number_of_layers_for_perflow == diffusion_cfg.distillation_network_config.params.depth, "The number of perflow and the number of layers for perflow must be equal to the depth of the distillation network."
@@ -492,13 +496,13 @@ def main():
         cfg_scale_cond_test = cfg_scale_test.expand(noise_test.shape[0]).to(device=device)
         t_test = torch.zeros_like(cfg_scale_cond_test)
 
-        for num_step_perflow in [1, 2, 6, 12, 24]:
+        for num_step_perflow in [1, 2, 6, 8, 12, 24]:
             sampling_start = time.time()
             with accelerator.autocast():
                 if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
                     output_test = ema_model.module.forward_cfg(noise_test, t_test, 1.5, y=y_test, number_of_step_perflow=num_step_perflow)
                 else:
-                    output_test = ema_model.forward_cfg(noise_test, t_test, 1, y=y_test, number_of_step_perflow=num_step_perflow)
+                    output_test = ema_model.forward_cfg(noise_test, t_test, 4, y=y_test, number_of_step_perflow=num_step_perflow)
             
             sampling_time_1 = time.time() - sampling_start
             logger.info(f"Sampling time (NFE={num_step_perflow}): {sampling_time_1:.4f}s")
@@ -531,7 +535,7 @@ def main():
                     if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
                         output_test = ema_model.module.forward_cfg(latents, t_test, 2, y=y, number_of_step_perflow=6)
                     else:
-                        output_test = ema_model.forward_cfg(latents, t_test, 1, y=y, number_of_step_perflow=2)
+                        output_test = ema_model.forward_cfg(latents, t_test, 1, y=y, number_of_step_perflow=8)
 
                 samples = output_test[:, : n_patch_h*n_patch_w]
                 if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):

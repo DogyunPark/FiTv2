@@ -22,22 +22,22 @@ diffusion:
       reverse: false
       likelihood: false
   distillation_network_config:
-    target: fit.model.fit_model_lwd.FiTLwD
+    target: fit.model.fit_model_lwd.FiTLwD_sharedenc_sepdec
     params:
       context_size: 256
       patch_size: 2
       in_channels: 4
       hidden_size: 1024
-      depth: 27
+      depth: 24
       num_heads: 16
       mlp_ratio: 4.0
-      class_dropout_prob: 0.0
+      class_dropout_prob: 0.1
       num_classes: 1000
       learn_sigma: false
       use_sit: true
       use_swiglu: true
       use_swiglu_large: false
-      use_checkpoint: true
+      use_checkpoint: false
       q_norm: layernorm
       k_norm: layernorm
       qk_norm_weight: false
@@ -45,13 +45,13 @@ diffusion:
       abs_pos_embed: null
       adaln_type: lora
       adaln_lora_dim: 256
-      number_of_perflow: 9
+      number_of_perflow: 8
       fourier_basis: false
       edm_sigmas: false
       perlayer_embedder: false
       overlap: false
       number_of_shared_blocks: 0
-      number_of_representation_blocks: 4
+      number_of_representation_blocks: 10
       max_cached_len: 256
       n_patch_h: 16
       n_patch_w: 16
@@ -66,7 +66,7 @@ data:
       target_len: 256
       random: 'crop'
       loader:
-        batch_size: 42
+        batch_size: 36
         num_workers: 2
         shuffle: true
 
@@ -81,7 +81,7 @@ accelerate:
   # optimizer config
   learning_rate: 1.0e-4
   learning_rate_base_batch_size: 256
-  max_grad_norm: 2.0
+  max_grad_norm: 0
   optimizer:
     target: torch.optim.AdamW
     #target: CAME
@@ -93,7 +93,7 @@ accelerate:
       # weight_decay: 1.0e-2
       # eps: ${tuple:1e-30, 1e-16}
   lr_scheduler: constant_with_warmup
-  lr_warmup_steps: 10000
+  lr_warmup_steps: 0
   # checkpoint config
   logger: wandb
   checkpointing_epochs: False

@@ -48,9 +48,7 @@ from fit.model.fit_model import FiTBlock
 from fit.model.modules import FinalLayer, PatchEmbedder, TimestepEmbedder, LabelEmbedder
 from fit.scheduler.transport.utils import get_flexible_mask_and_ratio, mean_flat
 
-from came_pytorch import CAME
 from PIL import Image
-from elatentlpips import ELatentLPIPS
 from fit.scheduler.transport.utils import loss_func_huber
 from fit.utils.utils import bell_shaped_sample
 import tensorflow.compat.v1 as tf
@@ -514,7 +512,7 @@ def main():
                 if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
                     output_test = ema_model.module.forward_cfg(noise_test, t_test, 1.5, y=y_test, number_of_step_perflow=num_step_perflow)
                 else:
-                    output_test = ema_model.forward_cfg(noise_test, t_test, 2.5, y=y_test, number_of_step_perflow=num_step_perflow)
+                    output_test = ema_model.forward_cfg(noise_test, t_test, 3, y=y_test, number_of_step_perflow=num_step_perflow)
             
             sampling_time_1 = time.time() - sampling_start
             logger.info(f"Sampling time (NFE={num_step_perflow}): {sampling_time_1:.4f}s")
@@ -535,8 +533,11 @@ def main():
             number = 0
             arr_list = []
             test_fid_batch_size = 50
+            iters_num = 0
+            #print('iters_num: ', iters_num)
 
             while args.eval_fid_num_samples > number:
+                print('iters_num: ', iters_num)
                 latents = torch.randn((test_fid_batch_size, diffusion_cfg.distillation_network_config.params.in_channels, H, W)).to(device=device)
                 HX, WX = H, W
                 for _ in range(2):
@@ -554,7 +555,7 @@ def main():
                     if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
                         output_test = ema_model.module.forward_cfg(latents, t_test, 3, y=y, number_of_step_perflow=6)
                     else:
-                        output_test = ema_model.forward_cfg(latents, t_test, 1, y=y, number_of_step_perflow=2)
+                        output_test = ema_model.forward_cfg(latents, t_test, 1.5, y=y, number_of_step_perflow=10)
 
                 samples = output_test[:, : n_patch_h*n_patch_w]
                 if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
@@ -568,6 +569,7 @@ def main():
                 arr = samples.cpu().numpy()
                 arr_list.append(arr)
                 number += arr.shape[0]
+                iters_num += 1
             
             arr_list = np.concatenate(arr_list, axis=0)
             sample_acts, sample_stats, sample_stats_spatial = calculate_inception_stats_imagenet(arr_list, evaluator)
