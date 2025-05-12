@@ -41,19 +41,20 @@ from fit.utils.utils import (
     get_obj_from_str,
     update_ema,
     linear_decrease_division,
-    configure_optimizer_with_different_lr,
+    #configure_optimizer_with_different_lr
 )
 
-from fit.utils.eval_utils import init_from_ckpt, calculate_inception_stats_imagenet
+from fit.utils.eval_utils import init_from_ckpt, calculate_inception_stats_imagenet#, apply_cyclic_weights_to_model
 from fit.utils.lr_scheduler import get_scheduler
-from fit.model.fit_model_lwd import FiTBlock
-from fit.model.modules_lwd import FinalLayer, PatchEmbedder, TimestepEmbedder, LabelEmbedder, RepresentationBlock
+from fit.model.fit_model import FiTBlock
+from fit.model.modules import FinalLayer, PatchEmbedder, TimestepEmbedder, LabelEmbedder
+#from fit.model.utils import loss_func_huber
 from fit.scheduler.transport.utils import get_flexible_mask_and_ratio, mean_flat
 
 #from came_pytorch import CAME
 from PIL import Image
 #from elatentlpips import ELatentLPIPS
-from fit.scheduler.transport.utils import loss_func_huber
+#from fit.scheduler.transport.utils import   
 from fit.utils.utils import bell_shaped_sample, symmetric_segment_division, linear_increase_division, sample_posterior
 from fit.utils.evaluator import Evaluator
 from fit.utils.utils import preprocess_raw_image, load_encoders
@@ -250,12 +251,6 @@ def parse_args():
         default=False,
         help="Whether to use structured loss."
     )
-    parser.add_argument(
-        "--number_of_representation_blocks",
-        type=int,
-        default=None,
-        help="The number of representation blocks."
-    )
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -348,7 +343,7 @@ def main():
             # auto_wrap_policy = functools.partial(
             #     size_based_auto_wrap_policy, min_num_params=fsdp_cfg.min_num_params
             # ),
-            auto_wrap_policy = ModuleWrapPolicy([FiTBlock, RepresentationBlock]),
+            auto_wrap_policy = ModuleWrapPolicy([FiTBlock, FinalLayer, PatchEmbedder, TimestepEmbedder, LabelEmbedder]),
             cpu_offload = CPUOffload(offload_params=fsdp_cfg.cpu_offload),
             state_dict_type = {
                 'FULL_STATE_DICT': StateDictType.FULL_STATE_DICT,
@@ -417,30 +412,6 @@ def main():
         pretrained_model.eval()
 
     model = instantiate_from_config(diffusion_cfg.distillation_network_config).to(device=device)
-    #init_from_ckpt(model, checkpoint_dir=args.pretrain_ckpt2, ignore_keys='y_embedder', verbose=True)
-    # if torch.__version__ >= '2.0.0':
-    #     logger.info("Using torch.compile to optimize the model")
-    #     compile_mode = "max-autotune"  # Try this first for faster startup
-    #     for block in model.blocks:
-    #         block.attn.forward = torch.compile(
-    #             block.attn.forward,
-    #             backend="inductor", 
-    #             mode=compile_mode
-    #         )
-
-    # if torch.__version__ >= '2.0.0':
-    #     logger.info("Using torch.compile to optimize the model")
-    #     # You can choose different backends: 'inductor' (default), 'aot_eager', 'cudagraphs'
-    #     # mode options: 'default', 'reduce-overhead', 'max-autotune'
-    #     compile_kwargs = {
-    #         "backend": "inductor",
-    #         "mode": "reduce-overhead",
-    #         "fullgraph": False,  # Set to True for full graph optimization if your model supports it
-    #     }
-    #     model = torch.compile(model)
-    #     logger.info(f"Model compiled with settings: {compile_kwargs}")
-    # else:
-    #     logger.info("PyTorch version < 2.0, torch.compile not available")
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     fixed_params = sum(p.numel() for p in model.parameters() if not p.requires_grad) 
@@ -449,7 +420,6 @@ def main():
 
     number_of_perflow = args.number_of_perflow
     number_of_layers_for_perflow = args.number_of_layers_for_perflow
-    number_of_representation_blocks = args.number_of_representation_blocks
     assert number_of_perflow * number_of_layers_for_perflow == diffusion_cfg.distillation_network_config.params.depth, "The number of perflow and the number of layers for perflow must be equal to the depth of the distillation network."
     
     solver_step = args.solver_step
@@ -458,28 +428,13 @@ def main():
     logger.info(f"Number of layers for perflow: {number_of_layers_for_perflow}")
     logger.info(f"Total sampling steps: {number_of_perflow * solver_step}")
     
-    #scheduler = FlowMatchEulerDiscreteScheduler(invert_sigmas=True)
-    #scheduler.set_timesteps(num_inference_steps, device=device)
-    #timesteps = scheduler.timesteps
-    #sigmas = scheduler.sigmas
-    #sigmas = torch.linspace(0, 1, 3+1).to(device)
     sigmas = torch.linspace(0, 1, number_of_perflow+1).to(device)
-    #sigmas = linear_decrease_division(number_of_perflow)
-    #sigmas = symmetric_segment_division(number_of_perflow)
     sigmas = sigmas.to(device=device)
     logger.info(f"Sigmas: {sigmas}")
 
     # update ema
     if args.use_ema:
-        # ema_dtype = torch.float32
-        if hasattr(model, 'module'):
-            ema_model = deepcopy(model.module).to(device=device)
-        else:
-            ema_model = deepcopy(model).to(device=device)
-        
-        # if torch.__version__ >= '2.0.0':
-        #     ema_model = torch.compile(ema_model, **compile_kwargs)
-        #     logger.info("EMA model compiled")
+        ema_model = deepcopy(model).to(device=device)
 
         if getattr(diffusion_cfg, 'pretrain_config', None) != None: # transfer to larger reolution
             if getattr(diffusion_cfg.pretrain_config, 'ema_ckpt', None) != None:
@@ -490,16 +445,24 @@ def main():
         for p in ema_model.parameters():
             p.requires_grad = False
     
+    if args.pretrain_ckpt2:
+        #apply_cyclic_weights_to_model(model, model_path=args.pretrain_ckpt2, num_blocks=24, base_blocks=3, verbose=True)
+        init_from_ckpt(model, checkpoint_dir=args.pretrain_ckpt2, ignore_keys=None, verbose=True)
+
     if args.use_ema:
+        update_ema(ema_model, model, 0)
+
+    if args.use_ema:
+        print('Using EMA model!!')
         model = accelerator.prepare_model(model, device_placement=False)
         ema_model = accelerator.prepare_model(ema_model, device_placement=False)
     else:
         model = accelerator.prepare_model(model, device_placement=False)
-        
+
     # In SiT, we use transport instead of diffusion
     transport = create_transport(**OmegaConf.to_container(diffusion_cfg.transport))  # default: velocity; 
-    # schedule_sampler = create_named_schedule_sampler()
 
+    #import pdb; pdb.set_trace()
     # Setup Dataloader
     total_batch_size = data_cfg.params.train.loader.batch_size * accelerator.num_processes * grad_accu_steps
     global_steps = 0
@@ -522,43 +485,24 @@ def main():
             global_steps = int(resume_from_path.split("-")[1]) # gs not calculate the gradient_accumulation_steps
             logger.info(f"Resuming from steps: {global_steps}")
 
-    # get_train_dataloader = instantiate_from_config(data_cfg)
-    # train_len = get_train_dataloader.train_len()
-    # train_dataloader = get_train_dataloader.train_dataloader(
-    #     global_batch_size=total_batch_size, max_steps=accelerate_cfg.max_train_steps, 
-    #     resume_step=global_steps, seed=args.seed
-    # )
     train_dataset = CustomDataset(data_cfg.params.train.data_path)
     train_sampler = get_train_sampler(train_dataset, total_batch_size, accelerate_cfg.max_train_steps, global_steps, args.seed)
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=data_cfg.params.train.loader.batch_size, sampler=train_sampler, num_workers=data_cfg.params.train.loader.num_workers, pin_memory=True, drop_last=True)
-    # train_dataloader = torch.utils.data.DataLoader(
-    #         train_dataset, 
-    #         batch_size=data_cfg.params.train.loader.batch_size, 
-    #         sampler=train_sampler, 
-    #         num_workers=min(os.cpu_count() - 1, 8),  # Optimize worker count
-    #         pin_memory=True,
-    #         persistent_workers=True,  # Keep workers alive between epochs
-    #         prefetch_factor=2,  # Prefetch batches
-    #         drop_last=True
-    #     )
 
-    # Setup optimizer and lr_scheduler
-    # if accelerator.is_main_process:
-    #     for name, param in model.named_parameters():
-    #         print(name, param.requires_grad)
-    if getattr(diffusion_cfg, 'pretrain_config', None) != None: # transfer to larger reolution     
-        params = filter(lambda p: p.requires_grad, model.parameters())
-    else:
-        params = list(model.parameters())
+    #if getattr(diffusion_cfg, 'pretrain_config', None) != None: # transfer to larger reolution     
+    params = filter(lambda p: p.requires_grad, model.parameters())
+    # else:
+    #     params = list(model.parameters())
     optimizer_cfg = default(
         accelerate_cfg.optimizer, {"target": "torch.optim.AdamW"}
     )
+
     optimizer = get_obj_from_str(optimizer_cfg["target"])(
         params, lr=learning_rate, **optimizer_cfg.get("params", dict())
     )
 
     #optimizer = configure_optimizer_with_different_lr(model, base_lr=learning_rate, rep_lr_factor=1.0, blocks_lr_factor=2.0, **optimizer_cfg.get("params", dict()))
-    #optimizer = CAME(params, lr=learning_rate, **accelerate_cfg.optimizer.params)
+
     lr_scheduler = get_scheduler(
         accelerate_cfg.lr_scheduler,
         optimizer=optimizer,
@@ -642,8 +586,6 @@ def main():
                 else:
                     time.sleep(2)
     
-    #del model.module.representation_norm
-
     # save config
     OmegaConf.save(config=config, f=os.path.join(cfgdir, "config.yaml"))
     
@@ -677,13 +619,19 @@ def main():
         raw_x, x, y = batch
         raw_x = raw_x.to(device)
         x = x.to(device)
+        #import pdb; pdb.set_trace()
         y = y.to(device)
         x_data = sample_posterior(x, vae.config.scaling_factor)
+        #import pdb; pdb.set_trace()
         x = x_data.reshape(x_data.shape[0], -1, n_patch_h, patch_size, n_patch_w, patch_size)
         x = rearrange(x, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
         x = x.permute(0, 2, 1)
+        
+        # prepare other parameters
+        #y = y.squeeze(dim=-1).to(torch.int)
         #y = y.to(torch.int)
 
+        #cfg_scale = torch.randint(1, 5, (1,))
         cfg_scale = torch.tensor([4.0])
         cfg_scale_cond = cfg_scale.expand(x.shape[0]).to(device=device)
 
@@ -692,9 +640,11 @@ def main():
                 raw_x = raw_x / 255.
                 raw_x = preprocess_raw_image(raw_x, args.enc_type)
                 raw_z = encoders[0].forward_features(raw_x)
+                #import pdb; pdb.set_trace()
                 if 'dinov2' in args.enc_type:
                     raw_z_cls = raw_z['x_norm_clstoken']
                     raw_z_data = raw_z['x_norm_patchtokens']
+                #raw_z2 = encoders2[0].forward_features(raw_x)
         
         loss = 0.0
         proj_loss = 0.0
@@ -702,12 +652,17 @@ def main():
         per_block_idx = 0
         total_loss = 0.0
         total_proj_loss = 0.0
-        optimizer.zero_grad(set_to_none=True)
+        proj_loss_mean = 0.0
+        total_proj_loss2 = 0.0
+        optimizer.zero_grad()
+        for_iters = number_of_perflow
+        #with accelerator.accumulate(model):
+        
         for layer_idx in range(number_of_perflow):
-            x0 = torch.randn_like(x)
-            #optimizer.zero_grad()
+        #for _ in range(1):
             #loss = 0.0
             #proj_loss = 0.0
+            x0 = torch.randn_like(x)
             #layer_idx = torch.randint(0, number_of_perflow, (1,))
             #layer_idx = step % number_of_perflow
             sigma_next = sigmas[layer_idx + 1]
@@ -728,13 +683,15 @@ def main():
                 ratio = ratio.unsqueeze(-1)
             xt_input = x0 * (1-ratio) + x * ratio
 
-            model_kwargs = dict(y=y, target_layer_start=layer_idx * number_of_layers_for_perflow, target_layer_end=(layer_idx+1) * number_of_layers_for_perflow)
+            model_kwargs = dict(y=y, target_layer_start=layer_idx * number_of_layers_for_perflow, target_layer_end=(layer_idx+1) * number_of_layers_for_perflow,
+            #target_representation_layer_start=layer_idx * number_of_layers_for_perflow, target_representation_layer_end=(layer_idx+1) * number_of_layers_for_perflow)
+            )
 
             if args.reflow:
-                #per_flow_ratio = torch.randint(0, 1000, (x.shape[0],)) / 1000
-                per_flow_ratio = torch.rand(x.shape[0]).to(device=device)
-                #per_flow_ratio = per_flow_ratio.to(device=device)
+                per_flow_ratio = torch.randint(1, 250, (x.shape[0],)) / 250
+                per_flow_ratio = per_flow_ratio.to(device=device)
                 #per_flow_ratio = torch.rand(x.shape[0]).to(device=device)
+                ratio_finetune = per_flow_ratio.clone()
                 t_input = sigma_current + per_flow_ratio.clone() * (sigma_next - sigma_current)
                 while len(per_flow_ratio.shape) < x0.ndim:
                     per_flow_ratio = per_flow_ratio.unsqueeze(-1)
@@ -744,36 +701,54 @@ def main():
         
             # save memory for x, grid, mask
             # forward model and compute loss
+            #import pdb; pdb.set_trace()
             with accelerator.autocast():
-                #_, _ = get_flexible_mask_and_ratio(model_kwargs, x)
-                #if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                pred_model, representation_linear, representation_linear_cls = model(x_input, t_input, cfg_scale_cond, **model_kwargs)
+                pred, target, pred2, target2 = model(x_input, t_input, cfg_scale_cond, **model_kwargs, finetune_representation = True, t_next=sigma_current.repeat(x_input.shape[0]), xt_next=xt_input, ratio=ratio_finetune)
+
+            # MSE loss
+            losses = mean_flat((((pred - target.detach())) ** 2)) * weight
+
             
-            losses = mean_flat((((pred_model - target)) ** 2)) * weight
-            loss_mean = losses.mean()
+            # Cosine similarity loss
+            proj_loss_per = 0.0
+            for pred_i, target_i in zip(pred2, target2):
+                pred_norm = torch.nn.functional.normalize(pred_i, dim=-1)
+                target_norm = torch.nn.functional.normalize(target_i.detach(), dim=-1)
+                proj_loss_per += mean_flat(-(pred_norm * target_norm).sum(dim=-1))
+            proj_loss = proj_loss_per / pred2.shape[0]
+            
+            #losses2 = mean_flat((((pred2 - target2.detach())) ** 2)) * weight
+            loss_mean = losses.mean() #+ proj_loss
+            #loss_mean2 = losses2.mean()
+            #losses = mean_flat(loss_func_huber(pred, target.detach())) * weight
+            # proj_loss_per2 = 0.0
+            # for pred_i, target_i in zip(pred2, target2):
+            #     pred_norm = torch.nn.functional.normalize(pred_i, dim=-1)
+            #     target_norm = torch.nn.functional.normalize(target_i.detach(), dim=-1)
+            #     proj_loss_per2 += mean_flat(-(pred_norm * target_norm).sum(dim=-1))
+            # proj_loss2 = proj_loss_per2 / pred2.shape[0]
 
             if args.enc_type is not None:
-                proj_loss_per = 0.0
+                proj_loss_per3 = 0.0
                 #if layer_idx <= int(number_of_perflow/2):
                 for j, (repre_j, raw_z_j) in enumerate(zip(representation_linear, raw_z)):
                     raw_z_j = torch.nn.functional.normalize(raw_z_j, dim=-1) 
                     repre_j = torch.nn.functional.normalize(repre_j, dim=-1) 
-                    proj_loss_per += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
-                proj_loss_mean = proj_loss_per / raw_z.shape[0]
-                #proj_loss += proj_loss_mean
+                    proj_loss_per3 += mean_flat(-(raw_z_j * repre_j).sum(dim=-1))
+                proj_loss_mean = proj_loss_per3 / raw_z.shape[0]
 
-            # Backpropagate
-            #loss += loss #/ number_of_perflow
-            #proj_loss += proj_loss #/ number_of_perflow
-            loss += loss_mean
-            total_loss += loss_mean
-            loss += 0.5 * proj_loss_mean
+            loss += loss_mean #+ loss_mean2 * 0.01
+            total_loss += loss_mean #+ loss_mean2 * 0.01
+            loss += 1. * proj_loss_mean
+            loss += 1. * proj_loss
             total_proj_loss += proj_loss_mean
+            total_proj_loss2 += proj_loss
 
         loss = loss / number_of_perflow
         #proj_loss = proj_loss / number_of_perflow
         total_loss = total_loss / number_of_perflow
         total_proj_loss = total_proj_loss / number_of_perflow
+        total_proj_loss2 = total_proj_loss2 / number_of_perflow
         accelerator.backward(loss)
         if accelerator.sync_gradients and accelerate_cfg.max_grad_norm > 0.:
             all_norm = accelerator.clip_grad_norm_(
@@ -781,20 +756,14 @@ def main():
             )
         optimizer.step()
         # Gather the losses across all processes for logging (if we use distributed training).
-        #total_loss = total_loss / number_of_perflow
-        #total_proj_loss = total_proj_loss / number_of_perflow
         avg_loss = accelerator.gather(total_loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
         train_loss += avg_loss.item() / grad_accu_steps
         if args.enc_type is not None:
             avg_proj_loss = accelerator.gather(total_proj_loss.repeat(data_cfg.params.train.loader.batch_size)).mean()
-
+        avg_proj_loss2 = accelerator.gather(total_proj_loss2.repeat(data_cfg.params.train.loader.batch_size)).mean()
         # Checks if the accelerator has performed an optimization step behind the scenes; Check gradient accumulation
         if accelerator.sync_gradients: 
             if args.use_ema:
-                # update_ema(ema_model, deepcopy(model).type(ema_dtype), args.ema_decay)
-                # if torch.__version__ >= '2.0.0':
-                #     update_ema_for_compiled(ema_model, model, args.ema_decay)
-                # else:
                 update_ema(ema_model, model, args.ema_decay)
                 
             progress_bar.update(1)
@@ -804,6 +773,7 @@ def main():
                 accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=global_steps)
                 if args.enc_type is not None:
                     accelerator.log({"proj_loss": avg_proj_loss}, step=global_steps)
+                accelerator.log({"proj_loss2": avg_proj_loss2}, step=global_steps)
                 if accelerate_cfg.max_grad_norm != 0.0:
                     accelerator.log({"grad_norm": all_norm.item()}, step=global_steps)
             train_loss = 0.0
@@ -864,26 +834,6 @@ def main():
                     # samples = samples.clamp(-1, 1)
                     # if accelerator.is_main_process:
                     #     torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}.jpg"), normalize=True, scale_each=True)
-                    
-                    for nfe in [6]:
-                        with accelerator.autocast():
-                            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                                output_test = model.module.forward_cfg(noise_test, t_test, 2, number_of_step_perflow=nfe, y=y_test, noise=noise_test_list, representation_noise=noise_test)
-                            else:
-                                output_test = model.forward_cfg(noise_test, t_test, 2, number_of_step_perflow=nfe, y=y_test, noise=noise_test_list, representation_noise=noise_test)
-
-                        samples = output_test[:, : n_patch_h*n_patch_w]
-                        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                            samples = model.module.unpatchify(samples, (H, W))
-                        else:
-                            samples = model.unpatchify(samples, (H, W))
-                            
-                        #samples = samples.to(torch.bfloat16)     
-                        samples = vae.decode(samples / vae.config.scaling_factor).sample
-                        samples = samples.clamp(-1, 1)
-                        if accelerator.is_main_process:
-                            torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}.jpg"), normalize=True, scale_each=True)
-
                     for nfe in [6]:
                         with accelerator.autocast():
                             if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
@@ -901,11 +851,50 @@ def main():
                         samples = vae.decode(samples / vae.config.scaling_factor).sample
                         samples = samples.clamp(-1, 1)
                         if accelerator.is_main_process:
+                            torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-NFE{nfe}_gt.jpg"), normalize=True, scale_each=True)
+
+                    for nfe in [6]:
+                        with accelerator.autocast():
+                            if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
+                                output_test = ema_model.module.forward_cfg_int(noise_test, t_test, 2, number_of_step_perflow=nfe, y=y_test, noise=noise_test_list, representation_noise=noise_test)
+                            else:
+                                output_test = ema_model.forward_cfg_int(noise_test, t_test, 2, number_of_step_perflow=nfe, y=y_test, noise=noise_test_list, representation_noise=noise_test)
+
+                        samples = output_test[:, : n_patch_h*n_patch_w]
+                        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                            samples = model.module.unpatchify(samples, (H, W))
+                        else:
+                            samples = model.unpatchify(samples, (H, W))
+                            
+                        #samples = samples.to(torch.bfloat16)     
+                        samples = vae.decode(samples / vae.config.scaling_factor).sample
+                        samples = samples.clamp(-1, 1)
+                        if accelerator.is_main_process:
                             torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-NFE{nfe}.jpg"), normalize=True, scale_each=True)
+                    
+                    for nfe in [6]:
+                        with accelerator.autocast():
+                            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                                output_test = model.module.forward_cfg_int(noise_test, t_test, 2, number_of_step_perflow=nfe, y=y_test, noise=noise_test_list, representation_noise=noise_test)
+                            else:
+                                output_test = model.forward_cfg_int(noise_test, t_test, 2, number_of_step_perflow=nfe, y=y_test, noise=noise_test_list, representation_noise=noise_test)
+
+                        samples = output_test[:, : n_patch_h*n_patch_w]
+                        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                            samples = model.module.unpatchify(samples, (H, W))
+                        else:
+                            samples = model.unpatchify(samples, (H, W))
+                            
+                        #samples = samples.to(torch.bfloat16)     
+                        samples = vae.decode(samples / vae.config.scaling_factor).sample
+                        samples = samples.clamp(-1, 1)
+                        if accelerator.is_main_process:
+                            torchvision.utils.save_image(samples, os.path.join(f'{workdirnow}', f"images/fitv2_sample_{global_steps}-NFE{nfe}-model.jpg"), normalize=True, scale_each=True)
                 torch.cuda.empty_cache()
                 model.train()
-                
+
             if args.eval_fid and global_steps % accelerate_cfg.eval_fid_steps == 0 and global_steps > 0:
+                #model.eval()
                 with torch.no_grad():
                     number = 0
                     arr_list = []
@@ -918,9 +907,9 @@ def main():
 
                         with accelerator.autocast():
                             if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                                output_test = ema_model.module.forward_cfg(latents, t_test, accelerate_cfg.test_cfg_scale, number_of_step_perflow=accelerate_cfg.test_nfe, y=y, representation_noise=latents)
+                                output_test = ema_model.module.forward_cfg_int(latents, t_test, accelerate_cfg.test_cfg_scale, number_of_step_perflow=accelerate_cfg.test_nfe, y=y, representation_noise=latents)
                             else:
-                                output_test = ema_model.forward_wo_cfg(latents, t_test, accelerate_cfg.test_cfg_scale, number_of_step_perflow=accelerate_cfg.test_nfe, y=y, representation_noise=latents)
+                                output_test = ema_model.forward_cfg_int(latents, t_test, accelerate_cfg.test_cfg_scale, number_of_step_perflow=accelerate_cfg.test_nfe, y=y, representation_noise=latents)
 
                         samples = output_test[:, : n_patch_h*n_patch_w]
                         if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
@@ -941,19 +930,20 @@ def main():
                         inception_score = evaluator.compute_inception_score(sample_acts[0])
                         fid = sample_stats.frechet_distance(ref_stats)
                         sfid = sample_stats_spatial.frechet_distance(ref_stats_spatial)
-                        prec, recall = evaluator.compute_prec_recall(ref_acts[0], sample_acts[0])
+                        #prec, recall = evaluator.compute_prec_recall(ref_acts[0], sample_acts[0])
                         logger.info(f"Inception Score: {inception_score}")
                         logger.info(f"FID: {fid}")
                         logger.info(f"Spatial FID: {sfid}")
-                        logger.info(f"Precision: {prec}")
-                        logger.info(f"Recall: {recall}")
+                        #logger.info(f"Precision: {prec}")
+                        #logger.info(f"Recall: {recall}")
                         if getattr(accelerate_cfg, 'logger', 'wandb') != None:
                             accelerator.log({"inception_score": inception_score}, step=global_steps)
                             accelerator.log({"fid": fid}, step=global_steps)
                             accelerator.log({"sfid": sfid}, step=global_steps)
-                            accelerator.log({"prec": prec}, step=global_steps)
-                            accelerator.log({"recall": recall}, step=global_steps)
+                            #accelerator.log({"prec": prec}, step=global_steps)
+                            #accelerator.log({"recall": recall}, step=global_steps)
                 torch.cuda.empty_cache()
+                #model.train()
             accelerator.wait_for_everyone()
 
         logs = {"step_loss": total_loss.detach().item(), 

@@ -55,6 +55,7 @@ diffusion:
       max_cached_len: 256
       n_patch_h: 16
       n_patch_w: 16
+      finetune_representation: true
 data:
   target: fit.data.in1k_latent_dataset.INLatentLoader
   class_num: 1000
@@ -97,12 +98,12 @@ accelerate:
   # checkpoint config
   logger: wandb
   checkpointing_epochs: False
-  checkpointing_steps: 5000
+  checkpointing_steps: 2500
   checkpointing_steps_list: [50000, 100000, 200000, 400000, 1000000, 1400000, 1500000, 1800000]
   checkpoints_total_limit: 2
   logging_steps: 1000
-  evaluation_steps: 250
-  eval_fid_steps: 5000
+  evaluation_steps: 500
+  eval_fid_steps: 2500
   test_batch_size: 10
   test_fid_batch_size: 50
   test_nfe: 5

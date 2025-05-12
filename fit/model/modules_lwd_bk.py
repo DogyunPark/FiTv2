@@ -17,6 +17,45 @@ from timm.models.vision_transformer import Attention as VanillaAttention
 #           Embedding Layers for Patches, Timesteps and Class Labels            #
 #################################################################################
 
+class TimestepDependentCoefficient(nn.Module):
+    def __init__(self, embedding_dim):
+        """
+        Creates a module that produces a learnable scalar coefficient in [0,1] based on timestep embeddings.
+        
+        Args:
+            embedding_dim: Dimension of the timestep embedding
+        """
+        super().__init__()
+        
+        # Simple network to map from timestep embedding to coefficient
+        self.coefficient_net = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim // 2),
+            nn.SiLU(),
+            nn.Linear(embedding_dim // 2, 1),
+        )
+        
+        # Initialize the final layer to output values close to 0
+        # This will make sigmoid output ~0.5 at initialization
+        nn.init.zeros_(self.coefficient_net[-1].weight)
+        #nn.init.zeros_(self.coefficient_net[-1].bias)
+        nn.init.constant_(self.coefficient_net[-1].bias, -4.6)
+    
+    def forward(self, t_emb):
+        """
+        Computes coefficient from timestep embedding
+        
+        Args:
+            t_emb: Timestep embedding tensor of shape [B, embedding_dim]
+            
+        Returns:
+            coefficient: Tensor of shape [B, 1] with values bounded between 0 and 1
+        """
+        # Get raw coefficient value
+        raw_coef = self.coefficient_net(t_emb)
+        
+        # Apply sigmoid to bound between 0 and 1
+        return torch.sigmoid(raw_coef)
+
 class PatchEmbedder(nn.Module):
     """
     Embeds latent features into vector representations
@@ -179,28 +218,28 @@ class Attention(nn.Module):
         mask = torch.not_equal(mask, torch.zeros_like(mask)).to(mask)   # (B, N) -> (B, N)
         
         
-        # if x.device.type == "cpu":
-        #     x = F.scaled_dot_product_attention(
-        #         q, k, v, attn_mask=None,
-        #         dropout_p=0.,
-        #     )
-        # else:
-        #     with torch.backends.cuda.sdp_kernel(enable_flash=True):
-        #         '''
-        #         F.scaled_dot_product_attention is the efficient implementation equivalent to the following:
-        #             attn_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0) if is_causal else attn_mask
-        #             attn_mask = attn_mask.masked_fill(not attn_mask, -float('inf')) if attn_mask.dtype==torch.bool else attn_mask
-        #             attn_weight = torch.softmax((Q @ K.transpose(-2, -1) / math.sqrt(Q.size(-1))) + attn_mask, dim=-1)
-        #             attn_weight = torch.dropout(attn_weight, dropout_p)
-        #             return attn_weight @ V
-        #         In conclusion:
-        #             boolean attn_mask will mask the attention matrix where attn_mask is False
-        #             non-boolean attn_mask will be directly added to Q@K.T
-        #         '''
-        x = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=None,
-            dropout_p=0.,
-        )
+        if x.device.type == "cpu":
+            x = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attn_mask,
+                dropout_p=self.attn_drop.p if self.training else 0.,
+            )
+        else:
+            with torch.backends.cuda.sdp_kernel(enable_flash=True):
+                '''
+                F.scaled_dot_product_attention is the efficient implementation equivalent to the following:
+                    attn_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0) if is_causal else attn_mask
+                    attn_mask = attn_mask.masked_fill(not attn_mask, -float('inf')) if attn_mask.dtype==torch.bool else attn_mask
+                    attn_weight = torch.softmax((Q @ K.transpose(-2, -1) / math.sqrt(Q.size(-1))) + attn_mask, dim=-1)
+                    attn_weight = torch.dropout(attn_weight, dropout_p)
+                    return attn_weight @ V
+                In conclusion:
+                    boolean attn_mask will mask the attention matrix where attn_mask is False
+                    non-boolean attn_mask will be directly added to Q@K.T
+                '''
+                x = F.scaled_dot_product_attention(
+                    q, k, v, attn_mask=attn_mask,
+                    dropout_p=self.attn_drop.p if self.training else 0.,
+                )
         x = x.transpose(1, 2).reshape(B, N, C)
         x = x * mask[..., None] # mask: (B, N) -> (B, N, 1)
         x = self.proj(x)
@@ -232,18 +271,10 @@ class FiTBlock(nn.Module):
         adaln_bias=True,
         adaln_type='normal',
         adaln_lora_dim: int = None,
-        projection=False,
+        concat_adaln: bool = False,
         **block_kwargs
     ):
         super().__init__()
-        if projection:
-            self.projection = nn.Sequential(
-                nn.Linear(hidden_size*2, hidden_size*2),
-                nn.SiLU(),
-                nn.Linear(hidden_size*2, hidden_size)
-            )
-        else:
-            self.projection = None
         self.norm1 = create_norm(norm_layer, hidden_size)
         self.norm2 = create_norm(norm_layer, hidden_size)
         
@@ -267,9 +298,14 @@ class FiTBlock(nn.Module):
                 nn.Linear(hidden_size, 6 * hidden_size, bias=adaln_bias)
             )
         elif adaln_type == 'lora':
+            if concat_adaln:
+                hidden_concat_size = hidden_size * 2
+            else:
+                hidden_concat_size = hidden_size
+
             self.adaLN_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(hidden_size, adaln_lora_dim, bias=adaln_bias),
+                nn.Linear(hidden_concat_size, adaln_lora_dim, bias=adaln_bias),
                 nn.Linear(adaln_lora_dim, 6 * hidden_size, bias=adaln_bias)
             )
         elif adaln_type == 'swiglu':
@@ -278,9 +314,9 @@ class FiTBlock(nn.Module):
             )
 
     def forward(self, x, c, mask, freqs_cos, freqs_sin, global_adaln=0.0):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.adaLN_modulation(c)+ global_adaln).chunk(6, dim=-1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), mask, freqs_cos, freqs_sin)
-        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.adaLN_modulation(c) + global_adaln).chunk(6, dim=-1)
+        x = x + gate_msa * self.attn(modulate_representation(self.norm1(x), shift_msa, scale_msa), mask, freqs_cos, freqs_sin)
+        x = x + gate_mlp * self.mlp(modulate_representation(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
 class RepresentationBlock(nn.Module):
@@ -344,7 +380,6 @@ class RepresentationBlock(nn.Module):
     def forward(self, x, c, mask, freqs_cos, freqs_sin, global_adaln=0.0):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.adaLN_modulation(c) + global_adaln).chunk(6, dim=1)
         x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), mask, freqs_cos, freqs_sin)
-        #x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
@@ -352,23 +387,61 @@ class FinalLayer(nn.Module):
     """
     The final layer of DiT.
     """
-    def __init__(self, hidden_size, patch_size, out_channels, norm_layer: str = 'layernorm', adaln_bias=True, adaln_type='normal'):
+    def __init__(self, hidden_size, patch_size, out_channels, norm_layer: str = 'layernorm', adaln_bias=True, adaln_type='normal', concat_adaln: bool = False):
         super().__init__()
         self.norm_final = create_norm(norm_type=norm_layer, dim=hidden_size)
         self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
         if adaln_type == 'swiglu':
             self.adaLN_modulation = SwiGLU(in_features=hidden_size, hidden_features=hidden_size//2, out_features=2*hidden_size, bias=adaln_bias)
         else:   # adaln_type in ['normal', 'lora']
-            self.adaLN_modulation = nn.Sequential(
-                nn.SiLU(),
-                nn.Linear(hidden_size, 2 * hidden_size, bias=adaln_bias)
-            )
+            if concat_adaln:
+                self.adaLN_modulation = nn.Sequential(
+                    nn.SiLU(),
+                    nn.Linear(hidden_size*2, 2 * hidden_size, bias=adaln_bias)
+                )
+            else:
+                self.adaLN_modulation = nn.Sequential(
+                    nn.SiLU(),
+                    nn.Linear(hidden_size, 2 * hidden_size, bias=adaln_bias)
+                )
         
     def forward(self, x, c):
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
-        x = modulate(self.norm_final(x), shift, scale)
+        x = modulate_representation(self.norm_final(x), shift, scale)
+        #x = modulate(self.norm_final(x), shift, scale)
         x = self.linear(x)
         return x
+
+class SRN(nn.Module):
+    """
+    The final layer of DiT.
+    """
+    def __init__(self, hidden_size, patch_size, out_channels, norm_layer: str = 'layernorm', adaln_bias=True, adaln_type='normal', concat_adaln: bool = False):
+        super().__init__()
+        self.norm_final = create_norm(norm_type=norm_layer, dim=hidden_size)
+        self.linear = nn.Linear(hidden_size, out_channels, bias=True)
+        if adaln_type == 'swiglu':
+            self.adaLN_modulation = SwiGLU(in_features=hidden_size, hidden_features=hidden_size//2, out_features=2*hidden_size, bias=adaln_bias)
+        else:   # adaln_type in ['normal', 'lora']
+            if concat_adaln:
+                self.adaLN_modulation = nn.Sequential(
+                    nn.SiLU(),
+                    nn.Linear(hidden_size*2, 2 * hidden_size, bias=adaln_bias)
+                )
+            else:
+                self.adaLN_modulation = nn.Sequential(
+                    nn.SiLU(),
+                    nn.Linear(hidden_size, 2 * hidden_size, bias=adaln_bias)
+                )
+        nn.init.zeros_(self.linear.weight)
+        nn.init.zeros_(self.linear.bias)
+
+    def forward(self, x, c):
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
+        x = modulate_representation(self.norm_final(x), shift, scale)
+        #x = modulate(self.norm_final(x), shift, scale)
+        x = self.linear(x)
+        return torch.sigmoid(x)
 
 class FinalLayer_nomodulation(nn.Module):
     """

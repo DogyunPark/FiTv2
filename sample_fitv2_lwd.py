@@ -535,7 +535,7 @@ def main():
                     if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
                         output_test = ema_model.module.forward_cfg(latents, t_test, 2, y=y, number_of_step_perflow=6)
                     else:
-                        output_test = ema_model.forward_cfg(latents, t_test, 1, y=y, number_of_step_perflow=8)
+                        output_test = ema_model.forward_cfg(latents, t_test, 1, y=y, number_of_step_perflow=2)
 
                 samples = output_test[:, : n_patch_h*n_patch_w]
                 if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):

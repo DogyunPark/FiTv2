@@ -107,34 +107,55 @@ entropy_change_rate = np.array(entropy_change_rate)
 # The subplot size (15, 18) is good for a 3x2 grid with detailed plots
 # It provides enough space for each subplot and their labels/legends
 #Create a figure with two subplots
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+plt.rcParams.update({
+    #'font.family': 'sans-serif',
+    #'font.sans-serif': ['Arial'],
+    'font.size': 24,
+    'axes.labelsize': 20,
+    'axes.titlesize': 30,
+    'xtick.labelsize': 24,
+    'ytick.labelsize': 24,
+    'legend.fontsize': 24,
+    'figure.titlesize': 30,
+    'axes.grid': True,
+    'grid.alpha': 0.3,
+    'grid.linestyle': '--',
+    'axes.axisbelow': True,
+    #'axes.edgecolor': 'gray',
+    'axes.linewidth': 2,
+    'figure.facecolor': 'white',
+    #'axes.facecolor': '#F8F9FA'
+})
+
+fig, (ax1) = plt.subplots(1, 1, figsize=(12, 10))
 
 # Plot spectral entropy and its change rate
-ax1.plot(timesteps.numpy(), spectral_entropies, 'b-o', linewidth=2, label='Spectral Entropy')
-ax1.set_xlabel('Timestep (t)', fontsize=12)
-ax1.set_ylabel('Spectral Entropy', color='b', fontsize=12)
-ax1.tick_params(axis='y', labelcolor='b')
+ax1.plot(timesteps.numpy(), spectral_entropies, color='#4682B4', marker='o', linewidth=4, label='Spectral Entropy')
+ax1.set_xlabel('Timestep (t)', fontsize=28, fontweight='bold')
+ax1.set_ylabel('Spectral Entropy', color='#4682B4', fontsize=28, fontweight='bold')
+ax1.tick_params(axis='y', labelcolor='#4682B4')
 ax1.grid(True, alpha=0.3)
-ax1.set_title('Spectral Entropy vs Timestep', fontsize=14)
+#ax1.set_title('Spectral Entropy vs Timestep', fontsize=14)
 
 # Add entropy change rate on secondary axis
 ax1_twin = ax1.twinx()
-ax1_twin.plot(timesteps.numpy(), entropy_change_rate, 'r--s', linewidth=2, label='Change Rate')
-ax1_twin.set_ylabel('Change Rate of Entropy', color='r', fontsize=12)
-ax1_twin.tick_params(axis='y', labelcolor='r')
+ax1_twin.plot(timesteps.numpy()[::-1], hf_ratios, color='#E57373', marker='o', linewidth=4, label='High Frequency Ratio')
+ax1_twin.set_ylabel('High Frequency Ratio', color='#E57373', fontsize=28, fontweight='bold')
+ax1_twin.tick_params(axis='y', labelcolor='#E57373')
 
 # Add legend for both plots on the first subplot
 lines1, labels1 = ax1.get_legend_handles_labels()
-lines2, labels2 = ax1_twin.get_legend_handles_labels()
-ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=10)
+#lines2, labels2 = ax1_twin.get_legend_handles_labels()
+#ax1.legend(lines1, labels1, loc='upper right', fontsize=24)
 
 # Plot high frequency ratio
-ax2.plot(timesteps.numpy(), hf_ratios, 'm-o', linewidth=2)
-ax2.set_xlabel('Timestep (t)', fontsize=12)
-ax2.set_ylabel('High Frequency Ratio', fontsize=12)
-ax2.grid(True, alpha=0.3)
-ax2.set_title('High Frequency Ratio vs Timestep', fontsize=14)
+# ax2.plot(timesteps.numpy(), hf_ratios, 'm-o', linewidth=2)
+# ax2.set_xlabel('Timestep (t)', fontsize=12)
+# ax2.set_ylabel('High Frequency Ratio', fontsize=12)
+# ax2.grid(True, alpha=0.3)
+# ax2.set_title('High Frequency Ratio vs Timestep', fontsize=14)
 
 plt.tight_layout()
 plt.savefig('/hub_data2/dogyun/spectral_entropy_vs_timesteps.png', dpi=300, bbox_inches='tight')
+plt.savefig('/hub_data2/dogyun/spectral_entropy_vs_timesteps.pdf', format="pdf", bbox_inches='tight')
 plt.close()

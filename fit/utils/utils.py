@@ -107,6 +107,99 @@ def linear_decrease_division(N):
     sigmas = torch.cat((torch.tensor([0.0]), torch.cumsum(segment_length, dim=0)))
     return sigmas
 
+
+def configure_optimizer_with_different_lr(model, base_lr=1e-4, rep_lr_factor=0.5, blocks_lr_factor=1.0, **optimizer_kwargs):
+    """
+    Configure optimizer with different learning rates for different components of the model.
+    
+    Args:
+        model: Your FiTLwD_sharedenc_sepdec model
+        base_lr: Base learning rate
+        rep_lr_factor: Factor to multiply base_lr for representation_blocks (usually lower)
+        blocks_lr_factor: Factor to multiply base_lr for blocks (usually standard)
+        **optimizer_kwargs: Additional optimizer arguments like betas, weight_decay, eps, etc.
+                           These will be applied to all parameter groups
+        
+    Returns:
+        Configured optimizer
+    """
+    # Create parameter groups
+    param_groups = []
+    
+    # 1. Representation blocks (shared network A)
+    if hasattr(model, 'representation_blocks') and model.number_of_representation_blocks > 0:
+        rep_params = []
+        rep_params.extend(list(model.representation_blocks.parameters()))
+        
+        # Also include representation embedder and projector if they exist
+        if hasattr(model, 'representation_x_embedder'):
+            rep_params.extend(list(model.representation_x_embedder.parameters()))
+        if hasattr(model, 'linear_projection'):
+            rep_params.extend(list(model.linear_projection.parameters()))
+        
+        # Add global AdaLN modulation for representation if it exists
+        if hasattr(model, 'global_adaLN_modulation') and model.global_adaLN_modulation is not None:
+            rep_params.extend(list(model.global_adaLN_modulation.parameters()))
+        
+        # Add global AdaLN modulation for blocks if it exists
+        if hasattr(model, 'global_adaLN_modulation2') and model.global_adaLN_modulation2 is not None:
+            rep_params.extend(list(model.global_adaLN_modulation2.parameters()))
+        
+        # Patch embedder
+        if hasattr(model, 'x_embedder'):
+            rep_params.extend(list(model.x_embedder.parameters()))
+        # Time and label embedders
+        if hasattr(model, 't_embedder'):
+            rep_params.extend(list(model.t_embedder.parameters()))
+        if hasattr(model, 'y_embedder'):
+            rep_params.extend(list(model.y_embedder.parameters()))
+        
+        # Final layer
+        if hasattr(model, 'final_layer'):
+            rep_params.extend(list(model.final_layer.parameters()))
+        
+        param_groups.append({
+            'params': rep_params,
+            'lr': base_lr * rep_lr_factor,
+            'name': 'representation_network'  # For logging/debugging
+        })
+    
+    # 2. Main blocks (networks B, C, D)
+    if hasattr(model, 'blocks'):
+        blocks_params = list(model.blocks.parameters())
+            
+        param_groups.append({
+            'params': blocks_params,
+            'lr': base_lr * blocks_lr_factor,
+            'name': 'expert_blocks'  # For logging/debugging
+        })
+    
+    # Add remaining parameters that might not be covered above
+    # First get all parameter names already included
+    already_included_params = set()
+    for group in param_groups:
+        for param in group['params']:
+            already_included_params.add(id(param))
+    
+    # Now add any remaining parameters
+    remaining_params = []
+    for name, param in model.named_parameters():
+        if id(param) not in already_included_params:
+            remaining_params.append(param)
+    
+    if remaining_params:
+        param_groups.append({
+            'params': remaining_params,
+            'lr': base_lr * rep_lr_factor,
+            'name': 'other_params'  # For logging/debugging
+        })
+    
+    # Create optimizer with these parameter groups
+    # Apply any additional optimizer arguments (betas, weight_decay, eps, etc.)
+    optimizer = torch.optim.AdamW(param_groups, **optimizer_kwargs)
+    
+    return optimizer
+
 @torch.no_grad()
 def load_encoders(enc_type, device, resolution=256):
     assert (resolution == 256) or (resolution == 512)
