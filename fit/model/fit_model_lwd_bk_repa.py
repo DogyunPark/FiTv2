@@ -3,9 +3,9 @@ import torch.nn as nn
 from functools import partial
 from typing import Optional
 from einops import rearrange, repeat
-from fit.model.modules_lwd_bk import (
+from fit.model.modules_lwd import (
     PatchEmbedder, TimestepEmbedder, LabelEmbedder,
-    FiTBlock, FinalLayer, RepresentationBlock, TimestepDependentCoefficient, SRN
+    FiTBlock, FinalLayer, RepresentationBlock
 )
 from fit.model.utils import get_parameter_dtype, make_grid_mask_size, make_grid_mask_size_online
 from fit.utils.eval_utils import init_from_ckpt
@@ -103,13 +103,6 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
         self.n_patch_h = n_patch_h
         self.n_patch_w = n_patch_w
 
-        self.representation_x_embedder = PatchEmbedder(in_channels * patch_size**2, hidden_size, bias=True)
-        self.representation_blocks = nn.ModuleList([RepresentationBlock(
-            hidden_size, num_heads, mlp_ratio=mlp_ratio, swiglu=use_swiglu, swiglu_large=use_swiglu_large,
-            rel_pos_embed=rel_pos_embed, add_rel_pe_to_v=add_rel_pe_to_v, norm_layer=norm_type, 
-            q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight, qkv_bias=qkv_bias, ffn_bias=ffn_bias,
-            adaln_bias=adaln_bias, adaln_type=adaln_type, adaln_lora_dim=adaln_lora_dim
-        ) for _ in range(number_of_representation_blocks)])
         self.linear_projection = nn.Sequential(
                 nn.Linear(hidden_size, 2048),
                 nn.SiLU(),
@@ -130,18 +123,7 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
         if adaln_type == 'lora':
             self.global_adaLN_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(hidden_size, 6 * hidden_size, bias=adaln_bias)
-            )
-            if concat_adaln:
-                self.global_adaLN_modulation2 = nn.Sequential(
-                    nn.SiLU(),
-                    nn.Linear(hidden_size*2, 6 * hidden_size, bias=adaln_bias)
-                )
-            else:
-                 self.global_adaLN_modulation2 = nn.Sequential(
-                    nn.SiLU(),
-                    nn.Linear(hidden_size, 6 * hidden_size, bias=adaln_bias)
-                )
+                nn.Linear(hidden_size, 6 * hidden_size, bias=adaln_bias))
         else:
             self.global_adaLN_modulation = None        
         
@@ -149,27 +131,11 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
             hidden_size, num_heads, mlp_ratio=mlp_ratio, swiglu=use_swiglu, swiglu_large=use_swiglu_large,
             rel_pos_embed=rel_pos_embed, add_rel_pe_to_v=add_rel_pe_to_v, norm_layer=norm_type, 
             q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight, qkv_bias=qkv_bias, ffn_bias=ffn_bias, 
-            adaln_bias=adaln_bias, adaln_type=adaln_type, adaln_lora_dim=adaln_lora_dim, concat_adaln=concat_adaln
+            adaln_bias=adaln_bias, adaln_type=adaln_type, adaln_lora_dim=adaln_lora_dim
         ) for _ in range(depth)])
 
         final_layer_out_channels = self.out_channels*2 if fourier_basis else self.out_channels
-        self.final_layer = FinalLayer(hidden_size, patch_size, final_layer_out_channels, norm_layer=norm_type, adaln_bias=adaln_bias, adaln_type=adaln_type, concat_adaln=concat_adaln)
-
-        if finetune_representation:
-            self.mid_block = nn.ModuleList([FiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, swiglu=use_swiglu, swiglu_large=use_swiglu_large,
-               rel_pos_embed=rel_pos_embed, add_rel_pe_to_v=add_rel_pe_to_v, norm_layer=norm_type, 
-               q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight, qkv_bias=qkv_bias, ffn_bias=ffn_bias, 
-               adaln_bias=adaln_bias, adaln_type='normal', adaln_lora_dim=adaln_lora_dim) for _ in range(4)])
-            
-            # self.mid_block = nn.ModuleList([FiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, swiglu=use_swiglu, swiglu_large=use_swiglu_large,
-            #     rel_pos_embed=rel_pos_embed, add_rel_pe_to_v=add_rel_pe_to_v, norm_layer=norm_type, 
-            #     q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight, qkv_bias=qkv_bias, ffn_bias=ffn_bias, 
-            #     adaln_bias=adaln_bias, adaln_type='normal', adaln_lora_dim=adaln_lora_dim, concat_adaln=concat_adaln) for _ in range(3)])
-            #self.mid_block = nn.ModuleList([SRN(hidden_size, patch_size, hidden_size, norm_layer=norm_type, adaln_bias=adaln_bias, adaln_type=adaln_type, concat_adaln=concat_adaln) for _ in range(number_of_perflow)])         
-            #self.coefficient_layers = nn.ModuleList([TimestepDependentCoefficient(hidden_size) for _ in range(number_of_perflow)])
-            #self.coefficient_layers = nn.ModuleList([SRN(hidden_size, patch_size, hidden_size, norm_layer=norm_type, adaln_bias=adaln_bias, adaln_type=adaln_type) for _ in range(number_of_perflow)])
-            #self.coefficient_layers = SRN(hidden_size, patch_size, hidden_size, norm_layer=norm_type, adaln_bias=adaln_bias, adaln_type=adaln_type)
-            self.finetune(type=finetune, unfreeze=['mid_block'])
+        self.final_layer = FinalLayer(hidden_size, patch_size, final_layer_out_channels, norm_layer=norm_type, adaln_bias=adaln_bias, adaln_type=adaln_type)
 
         self.initialize_weights(pretrain_ckpt=pretrain_ckpt, ignore=ignore_keys)
         
@@ -184,10 +150,6 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
         self.apply(_basic_init)
-
-        if self.number_of_representation_blocks > 1:
-            nn.init.xavier_uniform_(self.representation_x_embedder.proj.weight.data)
-            nn.init.constant_(self.representation_x_embedder.proj.bias, 0)
 
         # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
         w = self.x_embedder.proj.weight.data
@@ -209,8 +171,6 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
         if self.adaln_type == 'lora':
             nn.init.constant_(self.global_adaLN_modulation[-1].weight, 0)
             nn.init.constant_(self.global_adaLN_modulation[-1].bias, 0)
-            nn.init.constant_(self.global_adaLN_modulation2[-1].weight, 0)
-            nn.init.constant_(self.global_adaLN_modulation2[-1].bias, 0)
         # Zero-out output layers:
         if self.adaln_type == 'swiglu':
             nn.init.constant_(self.final_layer.adaLN_modulation.fc2.weight, 0)
@@ -251,20 +211,6 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
             x = rearrange(x, "b (c p1 p2) h w -> b c (h p1) (w p2)", p1=p, p2=p) # (B, 16, h//2, w//2) -> (B, h, w, 4)
         return x
 
-    def get_segment_index(self, t):
-        """
-        Return the index (0-based) of the segment in [0,1] that t belongs to,
-        when [0,1] is divided into 6 uniform segments.
-        """
-        assert 0.0 <= t <= 1.0, "t must be in [0,1]"
-        
-        # Edge case: if t == 1.0, assign it to the last segment
-        if t == 1.0:
-            return self.number_of_perflow - 1
-        
-        segment_length = 1.0 / self.number_of_perflow
-        return int(t // segment_length)
-
     def forward_wo_cfg(self, x, t, cfg, y, number_of_step_perflow=1, noise=None, representation_noise=None):
         """
         Forward pass of FiT.
@@ -278,6 +224,7 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
         return: (B, p**2 * C_out, N), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
         """
         #cfg = cfg.float().to(x.dtype) 
+        y_embed = self.y_embedder(y, self.training)           # (B, D)
         
         grid, mask, size = make_grid_mask_size(x.shape[0], self.n_patch_h, self.n_patch_w, self.patch_size, x.device)
         # get RoPE frequences in advance, then calculate attention.
@@ -289,90 +236,6 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
             freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
 
         for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
-            y_embed = self.y_embedder(y, self.training)           # (B, D)
-
-            if i == len(self.blocks) // self.number_of_layers_for_perflow - 1:
-                sigma_next = (1 - 0.04)
-                sigma_current = self.sigmas[i]
-                sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow)
-                sigma_list = torch.cat([sigma_list, torch.tensor([1.0])], dim=0)
-            else:
-                sigma_next = self.sigmas[i+1] 
-                sigma_current = self.sigmas[i]
-                sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
-
-            for step in range(number_of_step_perflow):
-                t = sigma_list[step].expand(x.shape[0]).to(x.device)
-                t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
-                t = t.float().to(x.dtype)
-                t = self.t_embedder(t)
-                c = t + y_embed
-
-                if self.global_adaLN_modulation != None:
-                    global_adaln = self.global_adaLN_modulation(c)
-                else: 
-                    global_adaln = 0.0
-                
-                if self.number_of_representation_blocks > 1:
-                    representation_noise = self.representation_x_embedder(x)
-                    #import pdb; pdb.set_trace()
-                    for rep_block in self.representation_blocks:
-                        if not self.use_checkpoint:
-                            representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
-                        else:
-                            representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
-                
-                c_repre = t.unsqueeze(1) + representation_noise
-                #c_repre = torch.cat([c.unsqueeze(1).repeat(1, representation_noise.shape[1], 1), representation_noise], dim=-1)
-
-                if self.global_adaLN_modulation != None:
-                    global_adaln2 = self.global_adaLN_modulation2(c_repre)
-                else: 
-                    global_adaln2 = 0.0
-
-                residual = x.clone()
-                if not self.use_sit:
-                    x = rearrange(x, 'B C N -> B N C')          # (B, C, N) -> (B, N, C), where C = p**2 * C_in
-
-                x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
-                
-                if self.use_checkpoint:
-                    for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
-                        x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c_repre, mask, freqs_cos, freqs_sin, global_adaln2)
-                else:
-                    for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
-                        x = block(x, c_repre, mask, freqs_cos, freqs_sin, global_adaln2)
-                
-                x = self.final_layer(x, c_repre)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
-                x = (sigma_list[step+1] - sigma_list[step]) * x + residual
-        return x
-    
-    def forward_wo_cfg_pca(self, x, t, cfg, y, number_of_step_perflow=1, noise=None, representation_noise=None):
-        """
-        Forward pass of FiT.
-        x: (B, p**2 * C_in, N), tensor of sequential inputs (flattened latent features of images, N=H*W/(p**2))
-        t: (B,), tensor of diffusion timesteps
-        y: (B,), tensor of class labels
-        grid: (B, 2, N), tensor of height and weight indices that spans a grid
-        mask: (B, N), tensor of the mask for the sequence
-        size: (B, n, 2), tensor of the height and width, n is the number of the packed iamges
-        --------------------------------------------------------------------------------------------
-        return: (B, p**2 * C_out, N), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
-        """
-        #cfg = cfg.float().to(x.dtype) 
-        semantic_list = []
-        pca_list = []
-        grid, mask, size = make_grid_mask_size(x.shape[0], self.n_patch_h, self.n_patch_w, self.patch_size, x.device)
-        # get RoPE frequences in advance, then calculate attention.
-        if self.online_rope:    
-            freqs_cos, freqs_sin = self.rel_pos_embed.online_get_2d_rope_from_grid(grid, size)
-            freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
-        else:
-            freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
-            freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
-
-        for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
-            y_embed = self.y_embedder(y, self.training)           # (B, D)
 
             sigma_next = self.sigmas[i+1] 
             sigma_current = self.sigmas[i]
@@ -389,25 +252,6 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
                     global_adaln = self.global_adaLN_modulation(c)
                 else: 
                     global_adaln = 0.0
-                
-                if self.number_of_representation_blocks > 1:
-                    representation_noise = self.representation_x_embedder(x)
-                    #import pdb; pdb.set_trace()
-                    for rep_block in self.representation_blocks:
-                        if not self.use_checkpoint:
-                            representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
-                        else:
-                            representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
-                
-                semantic_list.append(representation_noise)
-                
-                c_repre = t.unsqueeze(1) + representation_noise
-                #c_repre = torch.cat([c.unsqueeze(1).repeat(1, representation_noise.shape[1], 1), representation_noise], dim=-1)
-
-                if self.global_adaLN_modulation != None:
-                    global_adaln2 = self.global_adaLN_modulation2(c_repre)
-                else: 
-                    global_adaln2 = 0.0
 
                 residual = x.clone()
                 if not self.use_sit:
@@ -415,21 +259,16 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
 
                 x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
                 
-                if self.use_checkpoint:
-                    for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
-                        x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c_repre, mask, freqs_cos, freqs_sin, global_adaln2)
-                else:
-                    for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
-                        x = block(x, c_repre, mask, freqs_cos, freqs_sin, global_adaln2)
+                for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
+                    x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c, mask, freqs_cos, freqs_sin, global_adaln)
                 
-                pca_list.append(x)
-                x = self.final_layer(x, c_repre)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
+                x = self.final_layer(x, c)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
 
                 x = x * mask[..., None]                         # mask the padding tokens
                 if not self.use_sit:
                     x = rearrange(x, 'B N C -> B C N')          # (B, N, C) -> (B, C, N), where C = p**2 * C_out
                 x = (sigma_list[step+1] - sigma_list[step]) * x + residual
-        return x, semantic_list, pca_list
+        return x
     
     def forward_wo_cfg_int(self, x, t, cfg, y, number_of_step_perflow=1, noise=None, representation_noise=None):
         """
@@ -453,13 +292,13 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
         else:
             freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
             freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
-        y_embed = self.y_embedder(y, self.training)           # (B, D)
 
         for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
+            y_embed = self.y_embedder(y, self.training)           # (B, D)
+
             sigma_next = self.sigmas[i+1] 
             sigma_current = self.sigmas[i]
             sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
-            sigma_list_ratio = (sigma_list - sigma_current) / (sigma_next - sigma_current)
 
             for step in range(number_of_step_perflow):
                 t = sigma_list[step].expand(x.shape[0]).to(x.device)
@@ -472,37 +311,17 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
                     global_adaln = self.global_adaLN_modulation(c)
                 else: 
                     global_adaln = 0.0
-
-                if step == 0:
-                    if self.number_of_representation_blocks > 1:
-                        representation_noise = self.representation_x_embedder(x)                
-                        #import pdb; pdb.set_trace()
-                        for rep_block in self.representation_blocks:
-                            if not self.use_checkpoint:
-                                representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
-                            else:
-                                representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
-                    representation_noise_t = representation_noise
-                else:
-                    x_mid = self.representation_x_embedder(x)
-                    ratio = sigma_list_ratio[step].expand(x.shape[0]).to(x.device)
-                    ratio = ratio.float().to(x.dtype)
-                    #ratio = self.t_embedder(ratio)
-
-                    c_mid = t.unsqueeze(1) + representation_noise
-                    #c_mid = t + y_embed
-                    #coefficient = self.coefficient_layers[i](t)
-                    #coefficient = self.coefficient_layers[i](x_mid.detach(), c_mid.detach())
-                    coefficient = ratio[:, None, None]
-                    #c_mid = torch.cat([c.unsqueeze(1).repeat(1, representation_noise.shape[1], 1), representation_noise], dim=-1)
-                    for mid_block in self.mid_block:
-                        x_mid = mid_block(x_mid, c_mid, mask, freqs_cos, freqs_sin, 0.0)
-                    #representation_noise_mid = self.mid_block[i](representation_noise, c_mid, mask, freqs_cos, freqs_sin, 0.0)
-                    #representation_noise_t = (1-coefficient.unsqueeze(1)) * representation_noise + coefficient.unsqueeze(1) * x_mid
-                    representation_noise_t = representation_noise + coefficient * x_mid
                 
-
-                c_repre = t.unsqueeze(1) + representation_noise_t
+                if self.number_of_representation_blocks > 1:
+                    representation_noise = self.representation_x_embedder(x)
+                    #import pdb; pdb.set_trace()
+                    for rep_block in self.representation_blocks:
+                        if not self.use_checkpoint:
+                            representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
+                        else:
+                            representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
+                
+                c_repre = t.unsqueeze(1) + representation_noise
                 #c_repre = torch.cat([c.unsqueeze(1).repeat(1, representation_noise.shape[1], 1), representation_noise], dim=-1)
 
                 if self.global_adaLN_modulation != None:
@@ -732,9 +551,6 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
         assert target_layer_end is not None, "target_layer_end must be provided"
         assert len(self.blocks) >= target_layer_end, "target_layer_end must be within the range of the number of blocks"
 
-        dummy_loss = 0.0
-        for p in self.parameters():
-            dummy_loss = dummy_loss + p.mean() * 0.0
         
         grid, mask, size = make_grid_mask_size_online(x, self.patch_size, x.device)
         # get RoPE frequences in advance, then calculate attention.
@@ -753,49 +569,25 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
         else: 
             global_adaln = 0.0
 
-        if self.number_of_representation_blocks > 1:
-            representation_noise = self.representation_x_embedder(x)
-            for rep_block in self.representation_blocks:
-                #import pdb; pdb.set_trace()
-                if not self.use_checkpoint:
-                    representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
-                else:
-                    representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
-            
-            representation_linear = self.linear_projection(representation_noise)
-            #drop_ids = torch.rand(x.shape[0], device=x.device) < 0.1
-            #representation_noise = torch.where(drop_ids[:, None, None], 0, representation_noise)
-
-        c_repre = t.unsqueeze(1) + representation_noise
-        #c_repre = torch.cat([c.unsqueeze(1).repeat(1, representation_noise.shape[1], 1), representation_noise], dim=-1)
-
-        if self.global_adaLN_modulation != None:
-            global_adaln2 = self.global_adaLN_modulation2(c_repre)
-        else: 
-            global_adaln2 = 0.0
-
         if not self.use_sit:
             x = rearrange(x, 'B C N -> B N C')          # (B, C, N) -> (B, N, C), where C = p**2 * C_in
 
         x = self.x_embedder(x)
 
-        if not self.use_checkpoint:
-            for i in range(target_layer_start, target_layer_end):
-                x = self.blocks[i](x, c_repre, mask, freqs_cos, freqs_sin, global_adaln2)
-        else:
-            for i in range(target_layer_start, target_layer_end):
-                x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(self.blocks[i]), x, c_repre, mask, freqs_cos, freqs_sin, global_adaln2)
+        linear_idx = 0
+        for i in range(target_layer_start, target_layer_end):
+            linear_idx += 1
+            x = self.blocks[i](x, c, mask, freqs_cos, freqs_sin, global_adaln)
+            if linear_idx == 6:
+                representation_linear = self.linear_projection(x)
 
-        x = self.final_layer(x, c_repre)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
+        x = self.final_layer(x, c)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
 
         x = x * mask[..., None]                         # mask the padding tokens
         if not self.use_sit:
             x = rearrange(x, 'B N C -> B C N')
         
-        if self.number_of_representation_blocks > 1:
-            return x, representation_linear, dummy_loss
-        else:
-            return x, None, None
+        return x, representation_linear, None
     
     def forward_run_layer_finetune(self, x, t, cfg, y, target_layer_start=None, target_layer_end=None, 
         target_representation_layer_start=None, target_representation_layer_end=None,
@@ -1082,8 +874,7 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
             #c_repre = torch.cat([c.unsqueeze(1).repeat(1, representation_noise.shape[1], 1), representation_noise2], dim=-1)
         return representation_linear, representation_linear2
     
-    def forward_cfg(self, x, t, cfg, y, number_of_step_perflow=1, noise=None, representation_noise=None,
-        guidance_low=0.0, guidance_high=1.0, self_guidance=False):
+    def forward_cfg(self, x, t, cfg, y, number_of_step_perflow=1, noise=None, representation_noise=None):
         """
         Forward pass of FiT.
         x: (B, p**2 * C_in, N), tensor of sequential inputs (flattened latent features of images, N=H*W/(p**2))
@@ -1098,17 +889,14 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
 
         #assert cfg > 1, "cfg must be greater than 1"
         y_null = torch.tensor([self.num_classes] * x.shape[0], device=x.device)
-        y_embed = torch.cat([y, y_null], dim=0)
-        y_embed = self.y_embedder(y_embed, self.training)           # (B, D)
-        #y = self.y_embedder(y, self.training)           # (B, D)
+        y = torch.cat([y, y_null], dim=0)
 
+        y_embed = self.y_embedder(y, self.training)           # (B, D)
         grid, mask, size = make_grid_mask_size(x.shape[0], self.n_patch_h, self.n_patch_w, self.patch_size, x.device)
         size = torch.cat([size, size], dim=0)
         grid = torch.cat([grid, grid], dim=0)
         mask = torch.cat([mask, mask], dim=0)
 
-        x_next = x#.to(torch.float64)
-        _dtype = x.dtype
         # get RoPE frequences in advance, then calculate attention.
         if self.online_rope:    
             freqs_cos, freqs_sin = self.rel_pos_embed.online_get_2d_rope_from_grid(grid, size)
@@ -1118,25 +906,14 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
             freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
         
         for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
-            if i == len(self.blocks) // self.number_of_layers_for_perflow - 1:
-                sigma_next = (1 - 0.04)
-                sigma_current = self.sigmas[i]
-                sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow)
-                sigma_list = torch.cat([sigma_list, torch.tensor([1.0])], dim=0)
-            else:
-                sigma_next = self.sigmas[i+1] 
-                sigma_current = self.sigmas[i]
-                sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
+            sigma_next = self.sigmas[i+1]
+            sigma_current = self.sigmas[i]
+            sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
 
             for step in range(number_of_step_perflow):
-                t_cur = sigma_list[step]
-                x = x_next
-                #if guidance_low <= t_cur and t_cur <= guidance_high:
-                x = torch.cat([x, x], dim=0).to(dtype=_dtype)
-
-                t = sigma_list[step].expand(x.shape[0]).to(x.device, dtype=_dtype)
-                #t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
-                #t = t.float().to(x.dtype)
+                t = sigma_list[step].expand(x.shape[0]*2).to(x.device)
+                t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
+                t = t.float().to(x.dtype)
                 
                 t = self.t_embedder(t)
                 c = t + y_embed
@@ -1146,46 +923,31 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
                 else: 
                     global_adaln = 0.0
 
-                if self.number_of_representation_blocks > 1:
-                    representation_noise = self.representation_x_embedder(x)
-                    for rep_block in self.representation_blocks:
-                        if not self.use_checkpoint:
-                            representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
-                        else:
-                            representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
-                    
-                    if self_guidance:
-                        if guidance_low <= t_cur and t_cur <= guidance_high:
-                            representation_noise, representation_noise_null = representation_noise.chunk(2, dim=0)
-                            representation_noise = representation_noise_null + 1.1 * (representation_noise - representation_noise_null)
-                            representation_noise = torch.cat([representation_noise, representation_noise_null], dim=0)
-                            #representation_noise = self.representation_norm(representation_noise)
-                c_repre = t.unsqueeze(1) + representation_noise
-                #c_repre = torch.cat([c.unsqueeze(1).repeat(1, representation_noise.shape[1], 1), representation_noise], dim=-1)
-
-                if self.global_adaLN_modulation != None:
-                    global_adaln2 = self.global_adaLN_modulation2(c_repre)
-                else: 
-                    global_adaln2 = 0.0
+                residual = x.clone()
+                x = torch.cat([x, x], dim=0)
 
                 if not self.use_sit:
                     x = rearrange(x, 'B C N -> B N C')          # (B, C, N) -> (B, N, C), where C = p**2 * C_in
 
                 x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
                 
-                for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
-                    x = block(x, c_repre, mask, freqs_cos, freqs_sin, global_adaln2)
+                if self.use_checkpoint:
+                    for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
+                        x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c, mask, freqs_cos, freqs_sin, global_adaln)
+                else:
+                    for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
+                        x = block(x, c, mask, freqs_cos, freqs_sin, global_adaln)
 
-                x = self.final_layer(x, c_repre)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
-                x = x.to(x_next.dtype)
+                x = self.final_layer(x, c)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
+
+                x = x * mask[..., None]                         # mask the padding tokens
+                if not self.use_sit:
+                    x = rearrange(x, 'B N C -> B C N')          # (B, N, C) -> (B, C, N), where C = p**2 * C_out
                 
                 x_cond, x_uncond = x.chunk(2, dim=0)
-                if guidance_low <= t_cur and t_cur <= guidance_high:
-                    x = x_uncond + cfg * (x_cond - x_uncond)
-                else:
-                    x = x_cond
-                x_next = (sigma_list[step+1] - sigma_list[step]) * x + x_next
-        return x_next
+                x = x_uncond + cfg * (x_cond - x_uncond)
+                x = (sigma_list[step+1] - sigma_list[step]) * x + residual
+        return x
     
 
     def forward_maruyama(self, x, t, cfg, y, number_of_step_perflow=1, noise=None, representation_noise=None):
@@ -1201,21 +963,22 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
         return: (B, p**2 * C_out, N), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
         """
         #cfg = cfg.float().to(x.dtype) 
-        if self.perlayer_embedder:
-            y_embed = self.y_embedder[i](y, self.training)           # (B, D)
-        else:
-            y_embed = self.y_embedder(y, self.training)           # (B, D)
-
+        
         grid, mask, size = make_grid_mask_size(x.shape[0], self.n_patch_h, self.n_patch_w, self.patch_size, x.device)
-        if self.online_rope:    
-            freqs_cos, freqs_sin = self.rel_pos_embed.online_get_2d_rope_from_grid(grid, size)
-            freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
-        else:
-            freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
-            freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
         # get RoPE frequences in advance, then calculate attention.
 
         for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
+            if self.perlayer_embedder:
+                y_embed = self.y_embedder[i](y, self.training)           # (B, D)
+            else:
+                y_embed = self.y_embedder(y, self.training)           # (B, D)
+
+            if self.online_rope:    
+                freqs_cos, freqs_sin = self.rel_pos_embed.online_get_2d_rope_from_grid(grid, size)
+                freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
+            else:
+                freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
+                freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
 
             if i == len(self.blocks) // self.number_of_layers_for_perflow - 1:
                 sigma_next = (1 - 0.04)
@@ -1294,7 +1057,7 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
                     x = x + torch.sqrt(2 * diffusion) * dw
         return x
     
-    def forward_maruyama_cfg(self, x, t, cfg, y, number_of_step_perflow=1, noise=None, representation_noise=None, guidance_low=0.0, guidance_high=1.0, self_guidance=False):
+    def forward_maruyama_cfg(self, x, t, cfg, y, number_of_step_perflow=1, noise=None, representation_noise=None):
         """
         Forward pass of FiT.
         x: (B, p**2 * C_in, N), tensor of sequential inputs (flattened latent features of images, N=H*W/(p**2))
@@ -1307,11 +1070,23 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
         return: (B, p**2 * C_out, N), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
         """
         #cfg = cfg.float().to(x.dtype) 
-        y_null = torch.tensor([self.num_classes] * x.shape[0], device=x.device)
-        x_next = x#.to(torch.float64)
-        _dtype = x.dtype
+        
+        grid, mask, size = make_grid_mask_size(x.shape[0], self.n_patch_h, self.n_patch_w, self.patch_size, x.device)
+        # get RoPE frequences in advance, then calculate attention.
 
         for i in range(len(self.blocks) // self.number_of_layers_for_perflow):
+            if self.perlayer_embedder:
+                y_embed = self.y_embedder[i](y, self.training)           # (B, D)
+            else:
+                y_embed = self.y_embedder(y, self.training)           # (B, D)
+
+            if self.online_rope:    
+                freqs_cos, freqs_sin = self.rel_pos_embed.online_get_2d_rope_from_grid(grid, size)
+                freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
+            else:
+                freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
+                freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
+
             if i == len(self.blocks) // self.number_of_layers_for_perflow - 1:
                 sigma_next = (1 - 0.04)
                 sigma_current = self.sigmas[i]
@@ -1323,30 +1098,13 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
                 sigma_list = torch.linspace(sigma_current, sigma_next, number_of_step_perflow+1)
             
             for step in range(number_of_step_perflow):
-                t_cur = sigma_list[step]
-                t_next = sigma_list[step+1]
-                dt = t_next - t_cur
-                x_cur = x_next
-                #segment_index = self.get_segment_index(t_cur)
-
-                if cfg > 1.0 and t_cur >= guidance_low and t_cur <= guidance_high:
-                    model_input = torch.cat([x_cur, x_cur], dim=0)
-                    y_cur = torch.cat([y, y_null], dim=0)
+                t = sigma_list[step].expand(x.shape[0]).to(x.device)
+                t = torch.clamp(self.time_shifting * t / (1  + (self.time_shifting - 1) * t), max=1.0)        
+                t = t.float().to(x.dtype)
+                if self.perlayer_embedder:
+                    t = self.t_embedder[i](t)
                 else:
-                    model_input = x_cur
-                    y_cur = y
-
-                grid, mask, size = make_grid_mask_size(model_input.shape[0], self.n_patch_h, self.n_patch_w, self.patch_size, x.device)
-                #size = torch.cat([size, size], dim=0)
-                #grid = torch.cat([grid, grid], dim=0)
-                #mask = torch.cat([mask, mask], dim=0)
-                # get RoPE frequences in advance, then calculate attention.
-                freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
-                freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
-
-                y_embed = self.y_embedder(y_cur, self.training)           # (B, D)
-                t = t_cur.expand(model_input.shape[0]).to(x.device, dtype=_dtype)
-                t = self.t_embedder(t)
+                    t = self.t_embedder(t)
                 c = t + y_embed
 
                 if self.global_adaLN_modulation != None:
@@ -1355,7 +1113,7 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
                     global_adaln = 0.0
 
                 if self.number_of_representation_blocks > 1:
-                    representation_noise = self.representation_x_embedder(model_input.to(dtype=_dtype))
+                    representation_noise = self.representation_x_embedder(x)
                     #import pdb; pdb.set_trace()
                     for rep_block in self.representation_blocks:
                         if not self.use_checkpoint:
@@ -1363,12 +1121,6 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
                         else:
                             representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
                 
-                if self_guidance:
-                    if cfg > 1.0 and guidance_low <= t_cur and t_cur <= guidance_high:
-                        representation_noise, representation_noise_null = representation_noise.chunk(2, dim=0)
-                        representation_noise = representation_noise_null + 1.05 * (representation_noise - representation_noise_null)
-                        representation_noise = torch.cat([representation_noise, representation_noise_null], dim=0)
-
                 c_repre = t.unsqueeze(1) + representation_noise
                 #c_repre = torch.cat([c.unsqueeze(1).repeat(1, representation_noise.shape[1], 1), representation_noise], dim=-1)
 
@@ -1377,187 +1129,40 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
                 else: 
                     global_adaln2 = 0.0
 
-                v_cur = self.x_embedder(model_input.to(dtype=_dtype))                          # (B, N, C) -> (B, N, D)  
+                x_prev = x.clone()
+                if not self.use_sit:
+                    x = rearrange(x, 'B C N -> B N C')          # (B, C, N) -> (B, N, C), where C = p**2 * C_in
                 
-                for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
-                    v_cur = block(v_cur, c_repre, mask, freqs_cos, freqs_sin, global_adaln2)
+                x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
                 
-                v_cur = self.final_layer(v_cur, c_repre)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
-                #v_cur = v_cur.to(torch.float64)
+                if self.use_checkpoint:
+                    for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
+                        x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c_repre, mask, freqs_cos, freqs_sin, global_adaln2)
+                else:
+                    for block in self.blocks[i*self.number_of_layers_for_perflow: (i+1)*self.number_of_layers_for_perflow]:
+                        x = block(x, c_repre, mask, freqs_cos, freqs_sin, global_adaln2)
+                
+                x = self.final_layer(x, c_repre)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
 
-                w_cur = torch.randn_like(x_cur)
-                t = torch.ones_like(v_cur) * t_cur
+                x = x * mask[..., None]                         # mask the padding tokens
+                if not self.use_sit:
+                    x = rearrange(x, 'B N C -> B C N')          # (B, N, C) -> (B, C, N), where C = p**2 * C_out
+                
+                dt = sigma_list[step+1] - sigma_list[step]
+                w_cur = torch.randn_like(x)
+                t = torch.ones_like(x) * sigma_list[step]
                 dw = w_cur * torch.sqrt(dt)
-                diffusion = (1-t_cur)
-
-                score = (t * v_cur - model_input) / (1 - t)
-                drift = v_cur + 1/2*diffusion * score
                 
-                if cfg > 1.0 and guidance_low <= t_cur and t_cur <= guidance_high:
-                    drift_cond, drift_uncond = drift.chunk(2, dim=0)
-                    drift = drift_uncond + cfg * (drift_cond - drift_uncond)
+                score = (t * x - x_prev) / (1 - t)
+                drift = x + (1-t) * score
+                diffusion = (1-t)
 
                 if (i == len(self.blocks) // self.number_of_layers_for_perflow - 1) and (step == number_of_step_perflow - 1):
-                    x_next = x_cur + drift*dt
+                    x = x_prev + drift*dt
                 else:
-                    x_next = x_cur + drift*dt
-                    x_next = x_next + torch.sqrt(diffusion) * dw
-        return x_next
-
-    def forward_maruyama_cfg2(self, x, t, cfg, y, number_of_step_perflow=1, noise=None, representation_noise=None, guidance_low=0.0, guidance_high=1.0, self_guidance=False):
-        """
-        Forward pass of FiT.
-        x: (B, p**2 * C_in, N), tensor of sequential inputs (flattened latent features of images, N=H*W/(p**2))
-        t: (B,), tensor of diffusion timesteps
-        y: (B,), tensor of class labels
-        grid: (B, 2, N), tensor of height and weight indices that spans a grid
-        mask: (B, N), tensor of the mask for the sequence
-        size: (B, n, 2), tensor of the height and width, n is the number of the packed iamges
-        --------------------------------------------------------------------------------------------
-        return: (B, p**2 * C_out, N), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
-        """
-        #cfg = cfg.float().to(x.dtype) 
-        y_null = torch.tensor([self.num_classes] * x.shape[0], device=x.device)
-        
-        sigma_next = (1 - 0.04)
-        sigma_current = 0
-        sigma_list = torch.linspace(sigma_current, sigma_next, 250, dtype=torch.float64)
-        sigma_list = torch.cat([sigma_list, torch.tensor([1.0], dtype=torch.float64)], dim=0)
-        x_next = x.to(torch.float64)
-        _dtype = x.dtype
-
-        for i, (t_cur, t_next) in enumerate(zip(sigma_list[:-2], sigma_list[1:-1])):
-            dt = t_next - t_cur
-            x_cur = x_next
-            segment_index = self.get_segment_index(t_cur)
-            
-            if cfg > 1.0 and t_cur >= guidance_low and t_cur <= guidance_high:
-                model_input = torch.cat([x_cur, x_cur], dim=0)
-                y_cur = torch.cat([y, y_null], dim=0)
-            else:
-                model_input = x_cur
-                y_cur = y
-
-            grid, mask, size = make_grid_mask_size(model_input.shape[0], self.n_patch_h, self.n_patch_w, self.patch_size, x.device)
-            #size = torch.cat([size, size], dim=0)
-            #grid = torch.cat([grid, grid], dim=0)
-            #mask = torch.cat([mask, mask], dim=0)
-            # get RoPE frequences in advance, then calculate attention.
-            freqs_cos, freqs_sin = self.rel_pos_embed.get_cached_2d_rope_from_grid(grid)
-            freqs_cos, freqs_sin = freqs_cos.unsqueeze(1), freqs_sin.unsqueeze(1)
-
-            y_embed = self.y_embedder(y_cur, self.training)           # (B, D)
-            t = t_cur.expand(model_input.shape[0]).to(x.device, dtype=_dtype)
-            t = self.t_embedder(t)
-            c = t + y_embed
-            
-            if self.global_adaLN_modulation != None:
-                global_adaln = self.global_adaLN_modulation(c)
-            else: 
-                global_adaln = 0.0
-
-            if self.number_of_representation_blocks > 1:
-                representation_noise = self.representation_x_embedder(model_input.to(dtype=_dtype))
-                for rep_block in self.representation_blocks:
-                    representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
-            
-            if self_guidance:
-                if guidance_low <= t_cur and t_cur <= guidance_high:
-                    representation_noise, representation_noise_null = representation_noise.chunk(2, dim=0)
-                    representation_noise = representation_noise_null + 1.1 * (representation_noise - representation_noise_null)
-                    representation_noise = torch.cat([representation_noise, representation_noise_null], dim=0)
-
-            c_repre = t.unsqueeze(1) + representation_noise
-            #c_repre = torch.cat([c.unsqueeze(1).repeat(1, representation_noise.shape[1], 1), representation_noise], dim=-1)
-
-            if self.global_adaLN_modulation != None:
-                global_adaln2 = self.global_adaLN_modulation2(c_repre)
-            else: 
-                global_adaln2 = 0.0
-        
-            v_cur = self.x_embedder(model_input.to(dtype=_dtype))                          # (B, N, C) -> (B, N, D)  
-            
-            for block in self.blocks[segment_index*self.number_of_layers_for_perflow: (segment_index+1)*self.number_of_layers_for_perflow]:
-                v_cur = block(v_cur, c_repre, mask, freqs_cos, freqs_sin, global_adaln2)
-            
-            v_cur = self.final_layer(v_cur, c_repre)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
-            v_cur = v_cur.to(torch.float64)
-            
-            w_cur = torch.randn_like(x_cur)
-            t = torch.ones_like(v_cur) * t_cur
-            dw = w_cur * torch.sqrt(dt)
-            diffusion = 2*(1-t_cur)
-
-            score = (t * v_cur - model_input) / (1 - t)
-            drift = v_cur + 1/2*diffusion * score
-            
-            if cfg > 1.0 and guidance_low <= t_cur and t_cur <= guidance_high:
-                drift_cond, drift_uncond = drift.chunk(2, dim=0)
-                drift = drift_uncond + cfg * (drift_cond - drift_uncond)
-            
-            x_next = x_cur + drift * dt + torch.sqrt(diffusion) * dw
-        
-        # Last step
-        t_cur, t_next = sigma_list[-2], sigma_list[-1]
-        dt = t_next - t_cur
-        x_cur = x_next
-        segment_index = self.get_segment_index(t_cur)
-
-        if cfg > 1.0 and t_cur >= guidance_low and t_cur <= guidance_high:
-            model_input = torch.cat([x_cur, x_cur], dim=0)
-            y_cur = torch.cat([y, y_null], dim=0)
-        else:
-            model_input = x_cur
-            y_cur = y
-
-        y_embed = self.y_embedder(y_cur, self.training)           # (B, D)
-        t = t_cur.expand(model_input.shape[0]).to(x.device, dtype=_dtype)
-        t = self.t_embedder(t)
-        c = t + y_embed
-
-        if self.global_adaLN_modulation != None:
-            global_adaln = self.global_adaLN_modulation(c)
-        else: 
-            global_adaln = 0.0
-
-        if self.number_of_representation_blocks > 1:
-            representation_noise = self.representation_x_embedder(model_input.to(dtype=_dtype))
-            for rep_block in self.representation_blocks:
-                representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
-        
-        if self_guidance:
-            if guidance_low <= t_cur and t_cur <= guidance_high:
-                representation_noise, representation_noise_null = representation_noise.chunk(2, dim=0)
-                representation_noise = representation_noise_null + 1.1 * (representation_noise - representation_noise_null)
-                representation_noise = torch.cat([representation_noise, representation_noise_null], dim=0)
-
-        c_repre = t.unsqueeze(1) + representation_noise
-        #c_repre = torch.cat([c.unsqueeze(1).repeat(1, representation_noise.shape[1], 1), representation_noise], dim=-1)
-
-        if self.global_adaLN_modulation != None:
-            global_adaln2 = self.global_adaLN_modulation2(c_repre)
-        else: 
-            global_adaln2 = 0.0
-        
-        v_cur = self.x_embedder(model_input.to(dtype=_dtype))                          # (B, N, C) -> (B, N, D)  
-        
-        for block in self.blocks[segment_index*self.number_of_layers_for_perflow: (segment_index+1)*self.number_of_layers_for_perflow]:
-            v_cur = block(v_cur, c_repre, mask, freqs_cos, freqs_sin, global_adaln2)
-        
-        v_cur = self.final_layer(v_cur, c_repre)                      # (B, N, p ** 2 * C_out), where C_out=2*C_in if leran_sigma, C_out=C_in otherwise.
-        v_cur = v_cur.to(torch.float64)
-
-        t = torch.ones_like(v_cur) * t_cur
-        diffusion = 2*(1-t_cur)
-        score = (t * v_cur - model_input) / (1 - t)
-        drift = v_cur + 1/2 * diffusion * score
-
-        if cfg > 1.0 and guidance_low <= t_cur and t_cur <= guidance_high:
-            drift_cond, drift_uncond = drift.chunk(2, dim=0)
-            drift = drift_uncond + cfg * (drift_cond - drift_uncond)
-
-        x_next = x_cur + drift * dt
-        return x_next
+                    x = x_prev + drift*dt
+                    x = x + torch.sqrt(2 * diffusion) * dw
+        return x
     
     def forward_maruyama_int(self, x, t, cfg, y, number_of_step_perflow=1, noise=None, representation_noise=None):
         """
@@ -1745,11 +1350,17 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
                                 representation_noise = rep_block(representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
                             else:
                                 representation_noise = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(rep_block), representation_noise, c, mask, freqs_cos, freqs_sin, global_adaln)
+
+                if not self.use_sit:
+                    x = rearrange(x, 'B C N -> B N C')          # (B, C, N) -> (B, N, C), where C = p**2 * C_in
                 
+                x_mid = self.representation_x_embedder(x)
+                x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
+
                 if step != 0:
-                    x_mid = self.representation_x_embedder(x)
+                #if 0:
                     ratio = sigma_list_ratio[step].expand(x.shape[0]).to(x.device)
-                    ratio = ratio.float().to(x.dtype)
+                    #ratio = ratio.float().to(x.dtype)
                     #ratio = self.t_embedder(ratio)
 
                     c_mid = t.unsqueeze(1) + representation_noise
@@ -1766,14 +1377,12 @@ class FiTLwD_sharedenc_sepdec(nn.Module):
                     #representation_noise_mid = self.mid_block[i](x_mid.detach(), c_mid.detach(), mask, freqs_cos, freqs_sin, 0.0)
                     #x_mid = self.mid_block[i](x_mid, c_mid, mask, freqs_cos, freqs_sin, 0.0)
                     #representation_noise_t = representation_noise + coefficient * x_mid
-                    representation_noise_t = representation_noise + coefficient * x_mid
+                    representation_noise_t = x_mid
                 else:
                     representation_noise_t = representation_noise
 
                 #c_repre = torch.cat([c.unsqueeze(1).repeat(1, representation_noise.shape[1], 1), representation_noise_t], dim=-1)
                 c_repre = t.unsqueeze(1) + representation_noise_t
-
-                x = self.x_embedder(x)                          # (B, N, C) -> (B, N, D)  
 
                 if self.global_adaLN_modulation != None:
                     global_adaln2 = self.global_adaLN_modulation2(c_repre)

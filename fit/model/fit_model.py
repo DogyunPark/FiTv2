@@ -60,6 +60,7 @@ class FiT(nn.Module):
         ignore_keys: list = None,
         finetune: str = None,
         time_shifting: int = 1,
+        save_attention: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -80,6 +81,7 @@ class FiT(nn.Module):
         self.adaln_type = adaln_type
         self.online_rope = online_rope
         self.time_shifting = time_shifting
+        self.save_attention = save_attention
 
         self.x_embedder = PatchEmbedder(in_channels * patch_size**2, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
@@ -104,7 +106,7 @@ class FiT(nn.Module):
             hidden_size, num_heads, mlp_ratio=mlp_ratio, swiglu=use_swiglu, swiglu_large=use_swiglu_large,
             rel_pos_embed=rel_pos_embed, add_rel_pe_to_v=add_rel_pe_to_v, norm_layer=norm_type, 
             q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight, qkv_bias=qkv_bias, ffn_bias=ffn_bias, 
-            adaln_bias=adaln_bias, adaln_type=adaln_type, adaln_lora_dim=adaln_lora_dim
+            adaln_bias=adaln_bias, adaln_type=adaln_type, adaln_lora_dim=adaln_lora_dim, save_attention=save_attention
         ) for _ in range(depth)])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, norm_layer=norm_type, adaln_bias=adaln_bias, adaln_type=adaln_type)
         self.initialize_weights(pretrain_ckpt=pretrain_ckpt, ignore=ignore_keys)
@@ -296,4 +298,35 @@ class FiT(nn.Module):
             for name, param in self.named_parameters():
                 if unf in name: # LN means Layer Norm
                     param.requires_grad = True
+        
+    def get_attention_maps(self):
+        """Get attention maps for all blocks if save_attention is enabled.
+        
+        Returns:
+            list: List of attention maps, one per block
+        """
+        if not self.save_attention:
+            return None
+            
+        attention_maps = []
+        for block in self.blocks:
+            attention_map = block.get_attention_map()
+            if attention_map is not None:
+                attention_maps.append(attention_map)
+        
+        return attention_maps
+    
+    def enable_attention_visualization(self):
+        """Enable saving attention maps during forward pass."""
+        self.save_attention = True
+        for block in self.blocks:
+            block.save_attention = True
+            block.attn.save_attention = True
+    
+    def disable_attention_visualization(self):
+        """Disable saving attention maps to save memory."""
+        self.save_attention = False
+        for block in self.blocks:
+            block.save_attention = False
+            block.attn.save_attention = False
         

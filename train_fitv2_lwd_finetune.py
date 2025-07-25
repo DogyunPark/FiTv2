@@ -688,9 +688,9 @@ def main():
             )
 
             if args.reflow:
-                per_flow_ratio = torch.randint(1, 250, (x.shape[0],)) / 250
-                per_flow_ratio = per_flow_ratio.to(device=device)
-                #per_flow_ratio = torch.rand(x.shape[0]).to(device=device)
+                # per_flow_ratio = torch.randint(1, 250, (x.shape[0],)) / 250
+                # per_flow_ratio = per_flow_ratio.to(device=device)
+                per_flow_ratio = torch.rand(x.shape[0]).to(device=device)
                 ratio_finetune = per_flow_ratio.clone()
                 t_input = sigma_current + per_flow_ratio.clone() * (sigma_next - sigma_current)
                 while len(per_flow_ratio.shape) < x0.ndim:

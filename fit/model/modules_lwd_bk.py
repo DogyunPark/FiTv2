@@ -170,6 +170,7 @@ class Attention(nn.Module):
         proj_drop: float = 0.,
         rel_pos_embed: Optional[str] = None,
         add_rel_pe_to_v: bool = False, 
+        save_attention: bool = False,
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
@@ -194,6 +195,9 @@ class Attention(nn.Module):
         self.rel_pos_embed = None if rel_pos_embed==None else rel_pos_embed.lower() 
         self.add_rel_pe_to_v = add_rel_pe_to_v
         
+        # Flag to save attention maps
+        self.save_attention = save_attention
+        self.attn_map = None
         
 
     def forward(self, 
@@ -217,7 +221,7 @@ class Attention(nn.Module):
         attn_mask = (attn_mask == attn_mask.transpose(-2, -1))  # (B, 1, 1, N) x (B, 1, N, 1) -> (B, 1, N, N)
         mask = torch.not_equal(mask, torch.zeros_like(mask)).to(mask)   # (B, N) -> (B, N)
         
-        
+        # Use optimized implementation when not saving attention
         if x.device.type == "cpu":
             x = F.scaled_dot_product_attention(
                 q, k, v, attn_mask=attn_mask,
@@ -240,11 +244,16 @@ class Attention(nn.Module):
                     q, k, v, attn_mask=attn_mask,
                     dropout_p=self.attn_drop.p if self.training else 0.,
                 )
+
         x = x.transpose(1, 2).reshape(B, N, C)
         x = x * mask[..., None] # mask: (B, N) -> (B, N, 1)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
+
+    def get_attention_map(self):
+        """Return the attention map saved during the last forward pass."""
+        return self.attn_map
 
 #################################################################################
 #                               Basic FiT Module                                #
@@ -272,16 +281,19 @@ class FiTBlock(nn.Module):
         adaln_type='normal',
         adaln_lora_dim: int = None,
         concat_adaln: bool = False,
+        save_attention: bool = False,
         **block_kwargs
     ):
         super().__init__()
         self.norm1 = create_norm(norm_layer, hidden_size)
         self.norm2 = create_norm(norm_layer, hidden_size)
+        self.save_attention = save_attention
         
         self.attn = Attention(
             hidden_size, num_heads=num_heads, rel_pos_embed=rel_pos_embed, 
             q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight,
-            qkv_bias=qkv_bias, add_rel_pe_to_v=add_rel_pe_to_v, 
+            qkv_bias=qkv_bias, add_rel_pe_to_v=add_rel_pe_to_v,
+            save_attention=save_attention, 
             **block_kwargs
         )
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
@@ -318,6 +330,12 @@ class FiTBlock(nn.Module):
         x = x + gate_msa * self.attn(modulate_representation(self.norm1(x), shift_msa, scale_msa), mask, freqs_cos, freqs_sin)
         x = x + gate_mlp * self.mlp(modulate_representation(self.norm2(x), shift_mlp, scale_mlp))
         return x
+    
+    def get_attention_map(self):
+        """Return the attention map from the attention module if save_attention is enabled."""
+        if self.save_attention:
+            return self.attn.get_attention_map()
+        return None
 
 class RepresentationBlock(nn.Module):
     """

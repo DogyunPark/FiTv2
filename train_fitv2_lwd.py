@@ -678,10 +678,11 @@ def main():
         raw_x = raw_x.to(device)
         x = x.to(device)
         y = y.to(device)
-        x_data = sample_posterior(x, vae.config.scaling_factor)
-        x = x_data.reshape(x_data.shape[0], -1, n_patch_h, patch_size, n_patch_w, patch_size)
-        x = rearrange(x, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
-        x = x.permute(0, 2, 1)
+        with torch.no_grad():
+            x_data = sample_posterior(x, vae.config.scaling_factor)
+            x = x_data.reshape(x_data.shape[0], -1, n_patch_h, patch_size, n_patch_w, patch_size)
+            x = rearrange(x, 'b c h1 p1 h2 p2 -> b (c p1 p2) (h1 h2)')
+            x = x.permute(0, 2, 1)
         #y = y.to(torch.int)
 
         cfg_scale = torch.tensor([4.0])
@@ -704,10 +705,11 @@ def main():
         total_proj_loss = 0.0
         optimizer.zero_grad(set_to_none=True)
         for layer_idx in range(number_of_perflow):
+            #print(f'layer_idx: {layer_idx}')
             x0 = torch.randn_like(x)
             #optimizer.zero_grad()
-            #loss = 0.0
-            #proj_loss = 0.0
+            loss = 0.0
+            proj_loss = 0.0
             #layer_idx = torch.randint(0, number_of_perflow, (1,))
             #layer_idx = step % number_of_perflow
             sigma_next = sigmas[layer_idx + 1]
@@ -747,7 +749,7 @@ def main():
             with accelerator.autocast():
                 #_, _ = get_flexible_mask_and_ratio(model_kwargs, x)
                 #if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                pred_model, representation_linear, representation_linear_cls = model(x_input, t_input, cfg_scale_cond, **model_kwargs)
+                pred_model, representation_linear, dummy_loss = model(x_input, t_input, cfg_scale_cond, **model_kwargs)
             
             losses = mean_flat((((pred_model - target)) ** 2)) * weight
             loss_mean = losses.mean()
@@ -763,18 +765,18 @@ def main():
                 #proj_loss += proj_loss_mean
 
             # Backpropagate
-            #loss += loss #/ number_of_perflow
-            #proj_loss += proj_loss #/ number_of_perflow
-            loss += loss_mean
+            loss += loss_mean / number_of_perflow + dummy_loss
+            proj_loss += proj_loss_mean / number_of_perflow
+            #loss += loss_mean
             total_loss += loss_mean
-            loss += 0.5 * proj_loss_mean
+            loss += 0.05 * proj_loss
             total_proj_loss += proj_loss_mean
+            accelerator.backward(loss)
 
-        loss = loss / number_of_perflow
+        #loss = loss / number_of_perflow
         #proj_loss = proj_loss / number_of_perflow
         total_loss = total_loss / number_of_perflow
         total_proj_loss = total_proj_loss / number_of_perflow
-        accelerator.backward(loss)
         if accelerator.sync_gradients and accelerate_cfg.max_grad_norm > 0.:
             all_norm = accelerator.clip_grad_norm_(
                 model.parameters(), accelerate_cfg.max_grad_norm
@@ -791,10 +793,6 @@ def main():
         # Checks if the accelerator has performed an optimization step behind the scenes; Check gradient accumulation
         if accelerator.sync_gradients: 
             if args.use_ema:
-                # update_ema(ema_model, deepcopy(model).type(ema_dtype), args.ema_decay)
-                # if torch.__version__ >= '2.0.0':
-                #     update_ema_for_compiled(ema_model, model, args.ema_decay)
-                # else:
                 update_ema(ema_model, model, args.ema_decay)
                 
             progress_bar.update(1)
@@ -918,7 +916,7 @@ def main():
 
                         with accelerator.autocast():
                             if isinstance(ema_model, torch.nn.parallel.DistributedDataParallel):
-                                output_test = ema_model.module.forward_cfg(latents, t_test, accelerate_cfg.test_cfg_scale, number_of_step_perflow=accelerate_cfg.test_nfe, y=y, representation_noise=latents)
+                                output_test = ema_model.module.forward_wo_cfg(latents, t_test, accelerate_cfg.test_cfg_scale, number_of_step_perflow=accelerate_cfg.test_nfe, y=y, representation_noise=latents)
                             else:
                                 output_test = ema_model.forward_wo_cfg(latents, t_test, accelerate_cfg.test_cfg_scale, number_of_step_perflow=accelerate_cfg.test_nfe, y=y, representation_noise=latents)
 
