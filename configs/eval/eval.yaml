@@ -34,9 +34,10 @@ network_config:
       representation_align: false
       n_patch_h: 16
       n_patch_w: 16
-      
+
 autoencoder:
   path: "/nfs/dogyun/vae-flux/"
+  
 sampling:
   per_proc_batch_size: 25
   num_fid_samples: 50000

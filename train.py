@@ -49,8 +49,6 @@ from fit.data.in1k_latent_dataset import get_train_sampler
 
 logger = get_logger(__name__, log_level="INFO")
 
-HF_TOKEN = "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"
-
 def mean_flat(x):
     """
     Take the mean over all non-batch dimensions.
