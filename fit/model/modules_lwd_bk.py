@@ -232,11 +232,14 @@ class Attention(nn.Module):
             )
         else:
             with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]):
+                q = q.to(torch.bfloat16)
+                k = k.to(torch.bfloat16)
+                v = v.to(torch.bfloat16)
                 x = F.scaled_dot_product_attention(
                     q, k, v,
                     dropout_p=self.attn_drop.p if self.training else 0.,
                     scale=self.scale
-                )
+                ).to(x.dtype)
         x = x.transpose(1, 2).contiguous().reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
