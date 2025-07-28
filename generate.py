@@ -72,7 +72,7 @@ def main(args):
     init_from_ckpt(model, ckpt_path)
     model.eval()  # important!
 
-    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema", local_files_only=False).to(device, dtype=weight_dtype)
+    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema", local_files_only=False).to(device, dtype=torch.bfloat16)
     vae.eval() # important
     assert args.cfg_scale >= 1.0, "In almost all cases, cfg_scale be >= 1.0"
     using_cfg = args.cfg_scale > 1.0
