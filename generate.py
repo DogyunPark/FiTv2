@@ -25,7 +25,7 @@ from fit.utils.eval_utils import init_from_ckpt
 from fit.utils.utils import instantiate_from_config
 
 @torch.no_grad()
-def from_sample_posterior(moments, latents_scale, latents_bias):
+def from_sample_posterior(moments, latents_scale, latents_bias=0.):
     device = moments.device
     z = (moments / latents_scale) + latents_bias
     return z
@@ -113,7 +113,7 @@ def main(args):
         with torch.inference_mode():
             output_test = model.forward_wo_cfg(latents, number_of_step_perflow=41, y=y)
             samples = model.unpatchify(output_test, (H, W))
-            samples = from_sample_posterior(samples, vae.config.scaling_factor, vae.config.shift_factor)
+            samples = from_sample_posterior(samples, vae.config.scaling_factor)
             samples = vae.decode(samples.to(torch.bfloat16)).sample
             samples = (samples + 1) / 2.
             samples = torch.clamp(
