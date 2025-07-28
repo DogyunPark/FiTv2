@@ -88,6 +88,10 @@ def main(args):
     dist.barrier()
 
     # Figure out how many samples we need to generate on each GPU and how many iterations we need to run:
+    patch_size = args.network_config.params.patch_size
+    n_patch_h = args.network_config.params.n_patch_h
+    n_patch_w = args.network_config.params.n_patch_w
+    H, W = n_patch_h * patch_size, n_patch_w * patch_size
     n = args.sampling.per_proc_batch_size
     global_batch_size = n * dist.get_world_size()
     # To make things evenly-divisible, we'll sample a bit more than we need and then discard the extra samples:
@@ -103,8 +107,8 @@ def main(args):
     pbar = tqdm(pbar) if rank == 0 else pbar
     total = 0
     for _ in pbar:
-        latents = torch.randn((test_fid_batch_size, n_patch_h*n_patch_w, (patch_size**2)*args.network_config.params.in_channels), device=device)
-        y = torch.randint(0, 1000, (test_fid_batch_size,), device=device)
+        latents = torch.randn((n, n_patch_h*n_patch_w, (patch_size**2)*args.network_config.params.in_channels), device=device)
+        y = torch.randint(0, 1000, (n,), device=device)
 
         with torch.inference_mode():
             output_test = model.module.forward_wo_cfg(latents, number_of_step_perflow=41, y=y)
