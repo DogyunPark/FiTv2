@@ -111,8 +111,8 @@ def main(args):
         y = torch.randint(0, 1000, (n,), device=device)
 
         with torch.inference_mode():
-            output_test = model.module.forward_wo_cfg(latents, number_of_step_perflow=41, y=y)
-            samples = model.module.unpatchify(output_test, (H, W))
+            output_test = model.modules.forward_wo_cfg(latents, number_of_step_perflow=41, y=y)
+            samples = model.modules.unpatchify(output_test, (H, W))
             samples = from_sample_posterior(samples, vae.config.scaling_factor, vae.config.shift_factor)
             samples = vae.decode(samples.to(torch.bfloat16)).sample
             samples = (samples + 1) / 2.
