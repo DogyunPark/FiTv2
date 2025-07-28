@@ -1,0 +1,102 @@
+logging:
+  output_dir: "exps"
+  name: "rebuttal"
+  exp_name: "improved_bfm_plus_repa"  # required; must be set by user
+  logging_dir: "logs"
+  report_to: "wandb"  # choices: [tensorboard, wandb, both]
+
+compile:
+  enabled: false                   # Enable torch.compile
+  mode: "reduce-overhead"          # Options: default, reduce-overhead, max-autotune
+  backend: "inductor"              # Backend to use (inductor is recommended)
+  fullgraph: false                 # Try to compile the entire graph (slower compile, faster runtime)
+  dynamic: null                    # Dynamic shapes handling (null=auto, true/false=explicit)
+  compile_vae: false
+
+network_config:
+    target: fit.model.bfm_repa.FiT
+    params:
+      context_size: 32
+      patch_size: 2
+      in_channels: 4
+      hidden_size: 384
+      depth: 24
+      num_heads: 6
+      mlp_ratio: 4.0
+      class_dropout_prob: 0.1
+      num_classes: 1000
+      learn_sigma: false
+      use_sit: true
+      use_swiglu: false
+      use_swiglu_large: false
+      use_checkpoint: false
+      q_norm: RMSNorm
+      k_norm: RMSNorm
+      qk_norm_weight: false
+      rel_pos_embed: rope
+      abs_pos_embed: null
+      adaln_type: normal
+      adaln_lora_dim: 96
+      number_of_perflow: 6
+      edm_sigmas: false
+      overlap: false
+      number_of_representation_blocks: 6
+      representation_align: true
+      representation_align_depth: 2
+      n_patch_h: 16
+      n_patch_w: 16
+
+autoencoder:
+  path: "/nfs/dogyun/vae-flux/"
+  
+dataset:
+  dataconfig:
+    target: fit.data.in1k_latent_dataset.INLatentLoader
+    params:
+      train:
+        data_path: datasets2/imagenet_256/
+        target_len: 256
+        random: 'crop'
+        loader:
+          batch_size: 64
+          num_workers: 2
+          shuffle: true
+  resolution: 256
+  batch_size: 256
+
+optimization:
+  allow_tf32: True
+  mixed_precision: "bf16"  # choices: [no, fp16, bf16]
+  epochs: 1400
+  resume_step: 1
+  max_train_steps: 400000
+  gradient_accumulation_steps: 1
+  learning_rate: 1e-4
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_weight_decay: 0.0
+  adam_epsilon: 1e-8
+  max_grad_norm: 1.0
+  seed: 0
+  num_workers: 2
+
+loss:
+  path_type: "linear"       # choices: [linear, cosine]
+  prediction: "v"           # choices: [v]
+  cfg_prob: 0.1
+  enc_type: "dinov2-vit-b"
+  # enc_type: None
+  proj_coeff: 0.5
+  weighting: "lognormal"
+  legacy: false
+
+evaluation:
+  checkpointing_steps: 10000
+  checkpointing_steps_list: [50000, 100000, 150000, 200000, 250000, 300000, 350000, 400000]
+  checkpoints_total_limit: 5
+  ref_path: "/hub_data2/dogyun/statistics/VIRTUAL_imagenet256_labeled.npz"
+  sampling_steps: 1000
+  eval_fid: true
+  evaluation_steps: 10000
+  evaluation_number_samples: 5000
+  evaluation_batch_size: 50

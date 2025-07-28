@@ -43,7 +43,7 @@ def create_norm(norm_type: str, dim: int, eps: float = 1e-6):
     elif norm_type == "w_rmsnorm":
         return RMSNorm(dim, eps=eps)
     elif norm_type == "rmsnorm":
-        return RMSNorm(dim, include_weight=False, eps=eps)
+        return RMSNorm(dim, eps=eps)
     elif norm_type == 'none':
         return nn.Identity()
     else:

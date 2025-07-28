@@ -4,6 +4,7 @@ import numpy as np
 import torch.nn.functional as F
 from torch import nn, Tensor
 from torch.jit import Final
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from timm.layers.mlp import SwiGLU, Mlp  
 from typing import Any, Callable, Dict, List, Optional, Union, Tuple
 from fit.model.rope import rotate_half
@@ -155,8 +156,6 @@ class LabelEmbedder(nn.Module):
 # modified from timm and eva-02
 # https://github.com/huggingface/pytorch-image-models/blob/main/timm/models/vision_transformer.py
 # https://github.com/baaivision/EVA/blob/master/EVA-02/asuka/modeling_finetune.py
-
-
 class Attention(nn.Module):
 
     def __init__(self,
@@ -169,13 +168,15 @@ class Attention(nn.Module):
         attn_drop: float = 0.,
         proj_drop: float = 0.,
         rel_pos_embed: Optional[str] = None,
-        add_rel_pe_to_v: bool = False, 
-        save_attention: bool = False,
+        add_rel_pe_to_v: bool = False,
+        **block_kwargs 
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
+        self.full_token_length = block_kwargs.get('full_token_length', None)
+        self.logit_rescale = block_kwargs.get('logit_rescale', False)
         self.scale = self.head_dim ** -0.5
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
@@ -187,18 +188,13 @@ class Attention(nn.Module):
         self.q_norm = create_norm(q_norm, self.head_dim)
         self.k_norm = create_norm(k_norm, self.head_dim)
         
-
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
         
         self.rel_pos_embed = None if rel_pos_embed==None else rel_pos_embed.lower() 
         self.add_rel_pe_to_v = add_rel_pe_to_v
-        
-        # Flag to save attention maps
-        self.save_attention = save_attention
-        self.attn_map = None
-        
+        self.learnable_scale = nn.Parameter(torch.ones(1, num_heads, 1, 1), requires_grad=True)        
 
     def forward(self, 
         x: torch.Tensor, 
@@ -211,49 +207,40 @@ class Attention(nn.Module):
         q, k, v = qkv.unbind(0) # (B, n_h, N, D_h)
         q, k = self.q_norm(q), self.k_norm(k)
 
+        q = q * (self.learnable_scale * torch.log(torch.tensor(N, device=q.device)))
+
         if self.rel_pos_embed in ['rope', 'xpos']:  # multiplicative rel_pos_embed
             if self.add_rel_pe_to_v:
                 v = v * freqs_cos + rotate_half(v) * freqs_sin
             q = q * freqs_cos + rotate_half(q) * freqs_sin
             k = k * freqs_cos + rotate_half(k) * freqs_sin
+    
+        if mask is None:
+            attn_mask = None
+        else:
+            attn_mask = mask[:, None, None, :]  # (B, N) -> (B, 1, 1, N)
+            attn_mask = (attn_mask == attn_mask.transpose(-2, -1))  # (B, 1, 1, N) x (B, 1, N, 1) -> (B, 1, N, N)
         
-        attn_mask = mask[:, None, None, :]  # (B, N) -> (B, 1, 1, N)
-        attn_mask = (attn_mask == attn_mask.transpose(-2, -1))  # (B, 1, 1, N) x (B, 1, N, 1) -> (B, 1, N, N)
-        mask = torch.not_equal(mask, torch.zeros_like(mask)).to(mask)   # (B, N) -> (B, N)
-        
-        # Use optimized implementation when not saving attention
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
         if x.device.type == "cpu":
             x = F.scaled_dot_product_attention(
                 q, k, v, attn_mask=attn_mask,
                 dropout_p=self.attn_drop.p if self.training else 0.,
             )
         else:
-            with torch.backends.cuda.sdp_kernel(enable_flash=True):
-                '''
-                F.scaled_dot_product_attention is the efficient implementation equivalent to the following:
-                    attn_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0) if is_causal else attn_mask
-                    attn_mask = attn_mask.masked_fill(not attn_mask, -float('inf')) if attn_mask.dtype==torch.bool else attn_mask
-                    attn_weight = torch.softmax((Q @ K.transpose(-2, -1) / math.sqrt(Q.size(-1))) + attn_mask, dim=-1)
-                    attn_weight = torch.dropout(attn_weight, dropout_p)
-                    return attn_weight @ V
-                In conclusion:
-                    boolean attn_mask will mask the attention matrix where attn_mask is False
-                    non-boolean attn_mask will be directly added to Q@K.T
-                '''
+            with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]):
                 x = F.scaled_dot_product_attention(
-                    q, k, v, attn_mask=attn_mask,
+                    q, k, v,
                     dropout_p=self.attn_drop.p if self.training else 0.,
+                    scale=self.scale
                 )
-
-        x = x.transpose(1, 2).reshape(B, N, C)
-        x = x * mask[..., None] # mask: (B, N) -> (B, N, 1)
+        x = x.transpose(1, 2).contiguous().reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
-
-    def get_attention_map(self):
-        """Return the attention map saved during the last forward pass."""
-        return self.attn_map
 
 #################################################################################
 #                               Basic FiT Module                                #
@@ -281,19 +268,16 @@ class FiTBlock(nn.Module):
         adaln_type='normal',
         adaln_lora_dim: int = None,
         concat_adaln: bool = False,
-        save_attention: bool = False,
         **block_kwargs
     ):
         super().__init__()
         self.norm1 = create_norm(norm_layer, hidden_size)
         self.norm2 = create_norm(norm_layer, hidden_size)
-        self.save_attention = save_attention
         
         self.attn = Attention(
             hidden_size, num_heads=num_heads, rel_pos_embed=rel_pos_embed, 
             q_norm=q_norm, k_norm=k_norm, qk_norm_weight=qk_norm_weight,
-            qkv_bias=qkv_bias, add_rel_pe_to_v=add_rel_pe_to_v,
-            save_attention=save_attention, 
+            qkv_bias=qkv_bias, add_rel_pe_to_v=add_rel_pe_to_v, 
             **block_kwargs
         )
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
@@ -330,12 +314,6 @@ class FiTBlock(nn.Module):
         x = x + gate_msa * self.attn(modulate_representation(self.norm1(x), shift_msa, scale_msa), mask, freqs_cos, freqs_sin)
         x = x + gate_mlp * self.mlp(modulate_representation(self.norm2(x), shift_mlp, scale_mlp))
         return x
-    
-    def get_attention_map(self):
-        """Return the attention map from the attention module if save_attention is enabled."""
-        if self.save_attention:
-            return self.attn.get_attention_map()
-        return None
 
 class RepresentationBlock(nn.Module):
     """
