@@ -65,7 +65,7 @@ def main(args):
     print(f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
 
     # Load model:
-    model = instantiate_from_config(args.network_config)
+    model = instantiate_from_config(args.network_config).to(device)
     # Auto-download a pre-trained model or load a custom SiT checkpoint from train.py:
     ckpt_path = f"{args.sample_dir}/checkpoints/save-0{args.iteration}/model_1.safetensors"
     # ckpt_path = args.ckpt
