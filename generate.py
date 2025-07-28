@@ -12,7 +12,7 @@ evaluation metrics via the ADM repo: https://github.com/openai/guided-diffusion/
 For a simple single-GPU/CPU sampling script, see sample.py.
 """
 import torch
-import torch.distributed as dists
+import torch.distributed as dist
 from diffusers.models import AutoencoderKL
 from tqdm import tqdm
 import os
