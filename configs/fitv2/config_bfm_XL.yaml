@@ -19,9 +19,9 @@ network_config:
       context_size: 32
       patch_size: 2
       in_channels: 4
-      hidden_size: 384
-      depth: 24
-      num_heads: 6
+      hidden_size: 1152
+      depth: 30
+      num_heads: 16
       mlp_ratio: 4.0
       class_dropout_prob: 0.1
       num_classes: 1000
@@ -35,12 +35,12 @@ network_config:
       qk_norm_weight: false
       rel_pos_embed: rope
       abs_pos_embed: null
-      adaln_type: normal
-      adaln_lora_dim: 96
+      adaln_type: lora
+      adaln_lora_dim: 288
       number_of_perflow: 6
       edm_sigmas: false
       overlap: false
-      number_of_representation_blocks: 6
+      number_of_representation_blocks: 20
       representation_align: true
       n_patch_h: 16
       n_patch_w: 16
@@ -57,7 +57,7 @@ dataset:
         target_len: 256
         random: 'crop'
         loader:
-          batch_size: 64
+          batch_size: 32
           num_workers: 2
           shuffle: true
   resolution: 256
@@ -68,7 +68,7 @@ optimization:
   mixed_precision: "bf16"  # choices: [no, fp16, bf16]
   epochs: 1400
   resume_step: 1
-  max_train_steps: 400000
+  max_train_steps: 1000000
   gradient_accumulation_steps: 1
   learning_rate: 1e-4
   adam_beta1: 0.9
