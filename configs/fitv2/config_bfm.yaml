@@ -1,7 +1,7 @@
 logging:
   output_dir: "exps"
   name: "rebuttal"
-  exp_name: "improved_bfm_S_align_ablation"  # required; must be set by user
+  exp_name: "improved_bfm_S_align"  # required; must be set by user
   logging_dir: "logs"
   report_to: "wandb"  # choices: [tensorboard, wandb, both]
 
@@ -41,7 +41,7 @@ network_config:
       edm_sigmas: false
       overlap: false
       number_of_representation_blocks: 6
-      representation_align: false
+      representation_align: true
       n_patch_h: 16
       n_patch_w: 16
 
@@ -83,8 +83,8 @@ loss:
   path_type: "linear"       # choices: [linear, cosine]
   prediction: "v"           # choices: [v]
   cfg_prob: 0.1
-  # enc_type: "dinov2-vit-b"
-  enc_type: None
+  enc_type: "dinov2-vit-b"
+  # enc_type: None
   proj_coeff: 0.5
   weighting: "lognormal"
   legacy: false
