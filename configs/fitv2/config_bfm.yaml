@@ -1,7 +1,7 @@
 logging:
   output_dir: "exps"
   name: "rebuttal"
-  exp_name: "improved_bfm_S_align"  # required; must be set by user
+  exp_name: "improved_bfm_S_align3"  # required; must be set by user
   logging_dir: "logs"
   report_to: "wandb"  # choices: [tensorboard, wandb, both]
 
@@ -27,15 +27,15 @@ network_config:
       num_classes: 1000
       learn_sigma: false
       use_sit: true
-      use_swiglu: false
+      use_swiglu: true
       use_swiglu_large: false
       use_checkpoint: false
-      q_norm: RMSNorm
-      k_norm: RMSNorm
+      q_norm: layernorm
+      k_norm: layernorm
       qk_norm_weight: false
       rel_pos_embed: rope
       abs_pos_embed: null
-      adaln_type: normal
+      adaln_type: lora
       adaln_lora_dim: 96
       number_of_perflow: 6
       edm_sigmas: false

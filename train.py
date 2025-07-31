@@ -143,7 +143,7 @@ def main(args):
         dynamo_plugin = None
 
     accelerator = Accelerator(
-        gradient_accumulation_steps=args.optimization.gradient_accumulation_steps,
+        #gradient_accumulation_steps=args.optimization.gradient_accumulation_steps,
         mixed_precision=args.optimization.mixed_precision,
         log_with=args.logging.report_to,
         project_config=accelerator_project_config,
@@ -324,20 +324,15 @@ def main(args):
                         if 'mocov3' in encoder_type: z = z = z[:, 1:] 
                         if 'dinov2' in encoder_type: z = z['x_norm_patchtokens']
                         zs.append(z)
-        
-            loss = 0.0
-            proj_loss = 0.0
-            block_idx = 0
-            per_block_idx = 0
-            total_loss = 0.0
-            total_proj_loss = 0.0
-            
-            #for layer_idx in range(number_of_perflow):
-            x0 = torch.randn_like(x)
-            #for layer_idx in range(number_of_perflow):
-            for _ in range(1):
+
+            total_loss_per_flow = 0.0
+            total_proj_loss_per_flow = 0.0
+            for_loop = 3
+
+            for _ in range(for_loop):
+                x0 = torch.randn_like(x)
+
                 layer_idx = random.randint(0, number_of_perflow-1)
-                #layer_idx = global_steps % number_of_perflow
                 sigma_next = sigmas[layer_idx + 1]
                 sigma_current = sigmas[layer_idx]
 
@@ -377,21 +372,22 @@ def main(args):
                     proj_loss_mean = torch.tensor(0.0, device=device)
 
                 # Backpropagate
-                loss += loss_mean
-                loss += 0.5 * proj_loss_mean
-                loss += loss_dummy
+                # loss += loss_mean
+                # loss += 0.5 * proj_loss_mean
+                # loss += loss_dummy
 
-                # total_loss += loss_mean
-                # total_proj_loss += proj_loss_mean
-
-            accelerator.backward(loss)
+                total_loss_per_flow += loss_mean
+                total_proj_loss_per_flow += proj_loss_mean
+            total_loss_per_flow /= for_loop
+            total_proj_loss_per_flow /= for_loop
+            total_loss = total_loss_per_flow + 0.5 * total_proj_loss_per_flow + loss_dummy
+            accelerator.backward(total_loss)
+                
             if accelerator.sync_gradients:
                 params_to_clip = model.parameters()
                 grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.optimization.max_grad_norm)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
-
-            accelerator.wait_for_everyone()
 
             # Gather the losses across all processes for logging (if we use distributed training).
             # total_loss = total_loss / number_of_perflow
@@ -523,9 +519,9 @@ def main(args):
                 
             accelerator.wait_for_everyone()
             logs = {
-                "loss": accelerator.gather(loss_mean).mean().detach().item(), 
+                "loss": accelerator.gather(total_loss_per_flow).mean().detach().item(), 
                 "grad_norm": accelerator.gather(grad_norm).mean().detach().item(),
-                "proj_loss": accelerator.gather(proj_loss_mean).mean().detach().item(),
+                "proj_loss": accelerator.gather(total_proj_loss_per_flow).mean().detach().item(),
             }
 
             progress_bar.set_postfix(**logs)

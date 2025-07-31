@@ -111,7 +111,8 @@ def main(args):
         y = torch.randint(0, 1000, (n,), device=device)
 
         with torch.inference_mode():
-            output_test = model.forward_wo_cfg(latents, number_of_step_perflow=41, y=y)
+            #output_test = model.forward_wo_cfg(latents, number_of_step_perflow=41, y=y)
+            output_test = model.forward_maruyama(latents, y, number_of_step_perflow=41)
             samples = model.unpatchify(output_test, (H, W))
             samples = from_sample_posterior(samples, vae.config.scaling_factor)
             samples = vae.decode(samples.to(torch.bfloat16)).sample
